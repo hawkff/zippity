@@ -269,9 +269,13 @@ def run():
             idle("Extracting the tagged archive did not finish")
             assert not (data / "tagged").exists() and not (data / "__MACOSX").exists()
             if sys.platform == "darwin":
-                for path in (data / "tagged-dir", data / "tagged-dir/t.txt"):
+                def tagged(path):
                     found = subprocess.run(["xattr", "-px", TAGS, str(path)], capture_output=True, text=True)
-                    assert "".join(found.stdout.split()).lower() == TAG_VALUE, (path, found.stdout, found.stderr)
+                    return "".join(found.stdout.split()).lower() == TAG_VALUE
+
+                # The folder's tags land after its files, at the end of the same task.
+                for path in (data / "tagged-dir", data / "tagged-dir/t.txt"):
+                    wait(lambda path=path: tagged(path), f"{path.name} did not get its Finder tags")
 
             keys("F8")
             wait(lambda: "example.zip" in screen(), "Archive was not selected")

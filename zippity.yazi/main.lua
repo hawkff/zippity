@@ -97,23 +97,39 @@ local info = ya.sync(function(state, archive)
 	end
 end)
 
+-- Yazi's nightly builds cancel file system jobs they no longer need, and a cancelled
+-- loader never stores its listing. Its claim lapses, and another caller lists instead.
+-- Each claim has its own generation, so a loader whose claim passed on changes nothing.
+local CLAIM_SECONDS = 5
+
 local claim = ya.sync(function(state, archive)
 	state.loading = state.loading or {}
-	if state.loading[archive] then
-		return false
+	local now, held = seconds(ya.time()), state.loading[archive]
+	if held and held.expires > now then
+		return nil
 	end
-	state.loading[archive] = true
-	return true
+	state.generation = (state.generation or 0) + 1
+	state.loading[archive] = { generation = state.generation, expires = now + CLAIM_SECONDS }
+	return state.generation
+end)
+
+local renew = ya.sync(function(state, archive, generation)
+	local held = (state.loading or {})[archive]
+	if held and held.generation == generation then held.expires = seconds(ya.time()) + CLAIM_SECONDS end
 end)
 
 -- Builds an archive's record on Yazi's main thread from the helper's line format, or from
 -- the members of a pending edit session. Handing the members over as one string keeps
 -- ya.sync from converting them one value at a time. Without a head it only releases the
--- claim on the archive.
-local store = ya.sync(function(state, archive, head, body, stamps, draft)
+-- claim on the archive. A loader that no longer holds the claim stores nothing.
+local store = ya.sync(function(state, archive, generation, head, body, stamps, draft)
+	local held = (state.loading or {})[archive]
+	if not held or held.generation ~= generation then
+		return false
+	end
 	state.loading[archive] = nil
 	if not head then
-		return
+		return true
 	end
 	local record = { source = head.source, edit_time = draft and draft.updated, preview_limit = head.preview_limit,
 		hidden = head.hidden or 0, stamps = stamps, entries = { [""] = { path = "", directory = true, size = 0 } },
@@ -152,6 +168,7 @@ local store = ya.sync(function(state, archive, head, body, stamps, draft)
 	state.archives[record.source.archive] = record
 	state.passwords = state.passwords or {}
 	state.passwords[record.source.archive] = state.passwords[archive] or state.passwords[record.source.archive]
+	return true
 end)
 
 local lookup = ya.sync(function(state, archive, member, children)
@@ -325,6 +342,35 @@ local function rpc(request, raw)
 	return result, not result and failure("io", tostring(decode_err)) or nil
 end
 
+-- Lists an archive under this caller's claim. The helper prints nothing until the listing
+-- is ready, so each second without a line renews the claim, and a slow listing keeps it.
+local function listing(request, archive, generation)
+	local child, err = spawn(request)
+	if not child then
+		return nil, err
+	end
+	local head, errors = "", ""
+	while true do
+		local line, event = child:read_line_with { timeout = 1000 }
+		if event == 3 then
+			renew(archive, generation)
+		elseif event == 1 then
+			errors = errors .. line
+		else
+			head = line or ""
+			break
+		end
+	end
+	local output, wait_err = child:wait_with_output()
+	if not output then
+		return nil, failure("io", tostring(wait_err))
+	end
+	if not output.status.success then
+		return nil, helper_error(ya.json_decode(errors .. output.stderr)) or failure("io", "Archive helper failed")
+	end
+	return head .. output.stdout
+end
+
 local function stamp(path)
 	local stat = stat_at(Url(path))
 	return stat and { path = path, size = stat.len, mtime = seconds(stat.mtime), ctime = seconds(stat.ctime) }
@@ -348,12 +394,15 @@ local function ensure(archive)
 		if record and fresh(record) then
 			return record
 		end
-		if claim(archive) then
-			local text, err = rpc({ op = "list", archive = real, password = password(archive), lines = true }, true)
+		local generation = claim(archive)
+		if not generation then
+			ya.sleep(0.05)
+		else
+			local text, err = listing({ op = "list", archive = real, password = password(archive), lines = true }, archive, generation)
 			local split = text and text:find("\n", 1, true)
 			local head = split and ya.json_decode(text:sub(1, split - 1))
 			if not head then
-				store(archive)
+				store(archive, generation)
 				return nil, err or failure("io", "Cannot read the archive index")
 			end
 			-- Only multipart names depend on their folder; other archives ignore files created beside them.
@@ -365,7 +414,7 @@ local function ensure(archive)
 			for _, path in ipairs(paths) do
 				local current = stamp(path)
 				if not current then
-					store(archive)
+					store(archive, generation)
 					return nil, failure("changed", "Archive volumes changed; reopen the archive")
 				end
 				stamps[#stamps + 1] = current
@@ -373,13 +422,14 @@ local function ensure(archive)
 			-- An edit session lives in the actions module's own state.
 			local draft, draft_err = require(".actions"):draft(archive, head.source.revision)
 			if draft_err then
-				store(archive)
+				store(archive, generation)
 				return nil, draft_err
 			end
-			store(archive, head, not draft and text:sub(split + 1) or "", stamps, draft)
-			return info(archive)
+			-- A loader that lost its claim drops its listing and looks again.
+			if store(archive, generation, head, not draft and text:sub(split + 1) or "", stamps, draft) then
+				return info(archive)
+			end
 		end
-		ya.sleep(0.05)
 	end
 	return nil, failure("busy", "Archive index is busy; retry the operation")
 end
