@@ -72,9 +72,11 @@ CRCs, and add no checksums of their own.
 
 ## Requirements
 
-- [Yazi](https://yazi-rs.github.io/docs/installation) 26.9.1. Its custom filesystem API is
-  experimental, so other versions need testing first.
-- The official 7-Zip `7zz` on PATH. The test suite runs against 7-Zip 26.05.
+- [Yazi](https://yazi-rs.github.io/docs/installation) 26.9.1, or a nightly build from
+  2026-11-02. Its custom filesystem API is experimental, so other versions need testing
+  first.
+- The official 7-Zip `7zz` on PATH. The test suite runs against 7-Zip 26.05 and Debian
+  13's 7zip 25.01.
 - Yazi's usual [preview tools](https://yazi-rs.github.io/docs/installation) for the file
   types you view.
 - [Rust](https://www.rust-lang.org/tools/install) stable, if you build the helper from source.
@@ -129,32 +131,39 @@ yay -S rar
 ### Debian
 
 Install Yazi from [Yazi's APT repository](https://yazi-rs.github.io/docs/installation#apt).
-Debian 13's own [`7zip`](https://packages.debian.org/trixie/7zip) package (25.01) prints a
-password prompt that Zippity doesn't recognize, so install the official 7-Zip build:
+Debian 13's [`7zip`](https://packages.debian.org/trixie/7zip) reads RAR archives with
+[`7zip-rar`](https://packages.debian.org/trixie/7zip-rar), which comes from Debian's
+non-free component. [Enable non-free](https://wiki.debian.org/SourcesList), then:
+
+```sh
+sudo apt install 7zip 7zip-rar
+```
+
+Debian's `7zip` installs 7-Zip as `7z`. Link it as `7zz`:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+ln -s "$(command -v 7z)" "$HOME/.local/bin/7zz"
+```
+
+Add the optional tools. [`rar`](https://packages.debian.org/trixie/rar) is in non-free
+too:
+
+```sh
+sudo apt install lz4 unar rar
+```
+
+### Other Linux distributions
+
+Install the official 7-Zip build. On x86_64:
 
 ```sh
 mkdir -p "$HOME/.local/bin"
 curl -fsSL https://github.com/ip7z/7zip/releases/download/26.05/7z2605-linux-x64.tar.xz | tar -xJ -C "$HOME/.local/bin" 7zz
 ```
 
-Add the optional tools:
-
-```sh
-sudo apt install lz4 unar
-```
-
-Debian ships [`rar`](https://packages.debian.org/trixie/rar) in its non-free component.
-[Enable non-free](https://wiki.debian.org/SourcesList), then:
-
-```sh
-sudo apt install rar
-```
-
-### Other Linux distributions
-
-Use the official 7-Zip build from the [Debian](#debian) section, or another
-[official 7-Zip download](https://www.7-zip.org/download.html). Some distribution builds
-leave out RAR support, so check that 7zz lists both Rar and Rar5:
+Other architectures have their own [official 7-Zip downloads](https://www.7-zip.org/download.html).
+Some distribution builds leave out RAR support, so check that 7zz lists both Rar and Rar5:
 
 ```sh
 7zz i | grep -E -w 'Rar5?'
@@ -511,7 +520,7 @@ Removing files doesn't securely erase them from disk.
 
 ## Development
 
-Run `bash scripts/check.sh` with Rust, 7zz, Yazi 26.9.1,
+Run `bash scripts/check.sh` with Rust, 7zz, Yazi 26.9.1 or nightly,
 [`file`](https://www.darwinsys.com/file/), [Lua](https://www.lua.org/),
 [Python 3](https://www.python.org/), [tmux](https://github.com/tmux/tmux), and
 [zstd](https://github.com/facebook/zstd) on PATH. Package and image fixtures use their own
@@ -532,7 +541,8 @@ lz4, [compress](https://github.com/vapier/ncompress),
 [hdiutil](https://ss64.com/mac/hdiutil.html),
 [xar](https://github.com/apple-oss-distributions/xar), and
 [pkgbuild](https://keith.github.io/xcode-man-pages/pkgbuild.1.html) on macOS. The suite
-tests the RAR writer when a licensed or evaluation `rar` is on PATH.
+tests the RAR writer when a licensed or evaluation `rar` is on PATH. The Yazi steps run the
+`yazi` on PATH, so run the suite once with each Yazi version you support.
 
 Install them on Debian 13:
 
