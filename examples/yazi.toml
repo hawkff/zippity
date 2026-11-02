@@ -1,0 +1,7 @@
+[plugin]
+prepend_fetchers = [
+  { url = "zippity://*", run = "zippity", prio = "high", group = "mime" },
+]
+prepend_previewers = [
+  { mime = "zippity/member", run = "zippity" },
+]

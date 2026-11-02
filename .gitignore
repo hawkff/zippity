@@ -1,0 +1,10 @@
+/target/
+/dist/
+.env
+.env.*
+.DS_Store
+._*
+*.swp
+*.swo
+/.idea/
+/.vscode/

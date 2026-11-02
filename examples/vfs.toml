@@ -1,0 +1,3 @@
+[zippity.archive]
+kind = "mount"
+run = "zippity"
