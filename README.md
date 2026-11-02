@@ -22,6 +22,7 @@ archives through [RARLAB `rar`](https://www.rarlab.com/download.htm) if you inst
 - [Install](#install)
   - [From a release](#from-a-release)
   - [From source](#from-source)
+  - [Plugin with ya pkg](#plugin-with-ya-pkg)
   - [Configure Yazi](#configure-yazi)
 - [Keys](#keys)
 - [Extracting](#extracting)
@@ -229,6 +230,18 @@ config="${YAZI_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/yazi}"
 mkdir -p "$config/plugins/zippity.yazi"
 cp -R zippity.yazi/. "$config/plugins/zippity.yazi/"
 ```
+
+### Plugin with ya pkg
+
+Yazi's [package manager](https://yazi-rs.github.io/docs/cli#pm) installs the plugin:
+
+```sh
+ya pkg add hawkff/zippity:zippity
+```
+
+Install the helper from a release bundle or from source as above. `ya pkg upgrade` takes
+the plugin from `main`. If Zippity then reports an older helper, install the helper from
+the newest release.
 
 ### Configure Yazi
 
