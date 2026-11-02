@@ -3,6 +3,17 @@
 local M = {}
 local api = {}
 
+-- Yazi's nightly builds call Cha Stat, return times as Time values, and stream directory
+-- listings and reads. Yazi 26.9.1 does none of that.
+local NIGHTLY = rawget(_G, "Stat") ~= nil
+local Stat = rawget(_G, "Stat") or rawget(_G, "Cha")
+-- The most the helper's reader returns for one request.
+local READ_CHUNK = 1024 * 1024
+
+local function seconds(time) return type(time) == "number" and time or time and time.unix end
+local function stat_of(file) return NIGHTLY and file.stat or file.cha end
+local function stat_at(...) return (fs.stat or fs.cha)(...) end
+
 -- Members with these names open as nested archives without a content probe. Every
 -- other file opens when the helper recognizes its content.
 local SUFFIXES = {}
@@ -21,7 +32,7 @@ local FILE_MODE = tonumber("100444", 8)
 
 local context = ya.sync(function()
 	local file = cx.active.current.hovered
-	return file and file.url, file and file.cha.is_dir, cx.active.current.cwd
+	return file and file.url, file and stat_of(file).is_dir, cx.active.current.cwd
 end)
 
 local clipboard = ya.sync(function()
@@ -233,7 +244,7 @@ local set_backing = ya.sync(function(state, archive, member, root, path, previou
 	local entry = record.entries[member]
 	if not entry then return nil end
 	if entry.backing ~= previous then return entry.backing end
-	entry.backing, entry.cached_at = path, ya.time()
+	entry.backing, entry.cached_at = path, seconds(ya.time())
 	record.cache_updated = entry.cached_at
 	return path
 end)
@@ -315,8 +326,8 @@ local function rpc(request, raw)
 end
 
 local function stamp(path)
-	local cha = fs.cha(Url(path))
-	return cha and { path = path, size = cha.len, mtime = cha.mtime, ctime = cha.ctime }
+	local stat = stat_at(Url(path))
+	return stat and { path = path, size = stat.len, mtime = seconds(stat.mtime), ctime = seconds(stat.ctime) }
 end
 
 local function fresh(record)
@@ -409,17 +420,15 @@ local function file(url, entry, record)
 		changed = math.max(changed, entry.cached_at or 0)
 	end
 	local name = entry.path:match("[^/]+$") or ""
-	return File {
-		url = url,
-		backing = entry.backing and Path.os(entry.backing),
-		cha = Cha {
-			mode = entry.directory and DIRECTORY_MODE or FILE_MODE,
-			kind = name:sub(1, 1) == "." and 2 or 0,
-			len = entry.size,
-			ctime = changed,
-			mtime = entry.directory and math.max(entry.modified or 0, modified) or (entry.modified or modified),
-		},
+	local stat = Stat {
+		mode = entry.directory and DIRECTORY_MODE or FILE_MODE,
+		kind = name:sub(1, 1) == "." and 2 or 0,
+		len = entry.size,
+		ctime = changed,
+		mtime = entry.directory and math.max(entry.modified or 0, modified) or (entry.modified or modified),
 	}
+	-- Yazi 26.9.1 reads cha. Nightly reads stat and lstat, which are the same for members.
+	return File { url = url, backing = entry.backing and Path.os(entry.backing), cha = stat, stat = stat, lstat = stat }
 end
 
 -- Says once per opening how many members the listing hides.
@@ -560,7 +569,7 @@ function M:materialize(url, automatic)
 		if automatic then return nil, failure("password", "Press Alt-u to unlock this member, then retry the preview.") end
 		if not prompt(item.archive) then return nil, failure("cancelled", "Preview cancelled") end
 	end
-	if item.entry.backing and fs.cha(Url(item.entry.backing)) then return item.entry.backing end
+	if item.entry.backing and stat_at(Url(item.entry.backing)) then return item.entry.backing end
 	if item.entry.unknown_size or item.entry.size > item.record.preview_limit then
 		if automatic then return nil, failure("limit", "Large member: press Alt-p or l to confirm previewing it.") end
 		local body = item.entry.unknown_size and "Its size is unknown until it is decompressed. This writes it to a private cache. Extraction does not need this preview copy."
@@ -588,20 +597,27 @@ function M:materialize(url, automatic)
 	return backing
 end
 
-function M:Capabilities()
-	return { symlink = false, hard_link = false, trash = false, copy_progressive = false }
-end
+-- No links, trash, or copies by the provider. Both Yazi versions read an empty table as
+-- every option off, and nightly rejects the names Yazi 26.9.1 used.
+function M:Capabilities() return {} end
 
 function M:ReadDir(job)
 	local item, err = locate(job.url)
-	if not item then return nil, fs_error(err) end
-	if not item.entry.directory then return nil, fs_error(failure("invalid", "Archive member is not a directory")) end
-	local result = {}
-	for _, entry in ipairs(lookup(item.archive, item.member, true) or {}) do
-		local current = file(job.url:join(entry.path:match("[^/]+$")), entry, item.record)
-		result[#result + 1] = { file = current, cha = current.cha }
+	if item and not item.entry.directory then item, err = nil, failure("invalid", "Archive member is not a directory") end
+	local files = {}
+	for _, entry in ipairs(item and lookup(item.archive, item.member, true) or {}) do
+		files[#files + 1] = file(job.url:join(entry.path:match("[^/]+$")), entry, item.record)
 	end
-	return result
+	-- Nightly takes the listing, and any error, as a stream.
+	if NIGHTLY then
+		return ya.co(function()
+			if not item then return nil, fs_error(err) end
+			for _, current in ipairs(files) do coroutine.yield(current) end
+		end)
+	end
+	if not item then return nil, fs_error(err) end
+	for i, current in ipairs(files) do files[i] = { file = current, cha = current.cha } end
+	return files
 end
 
 function M:File(job)
@@ -612,13 +628,13 @@ end
 
 function M:Metadata(job)
 	local result, err = self:File(job)
-	return result and result.cha, err
+	return result and stat_of(result), err
 end
 M.SymlinkMetadata = M.Metadata
 
 function M:Revalidate(job)
 	local result, err = self:File { url = job.file.url }
-	if result and result.cha:hash(true) == job.file.cha:hash(true) then return nil end
+	if result and stat_of(result):hash(true) == stat_of(job.file):hash(true) then return nil end
 	return result, err
 end
 
@@ -633,17 +649,39 @@ function M:Open(job)
 	if item.entry.unknown_size then
 		return nil, fs_error(failure("unsupported", "This member's size is unknown until it is decompressed; copy it with y and p"))
 	end
-	return 0
+	-- Nightly takes a handle, and the helper's reader starts at any offset.
+	return NIGHTLY and { id = 1, random = "read" } or 0
+end
+
+function M:Close() return true end
+
+local function read_range(item, offset, length)
+	if item.entry.input then
+		return rpc({ op = "read_input", change = { kind="put", path=item.member, source=item.entry.input, stamp=item.entry.stamp }, offset=offset, length=length }, true)
+	end
+	return require(".actions"):reader(api, item, offset, length)
 end
 
 function M:Read(job)
 	local item, err = locate(job.url)
-	if not item then return nil, fs_error(err) end
-	local bytes, read_err
-	if item.entry.input then
-		bytes, read_err = rpc({ op = "read_input", change = { kind="put", path=item.member, source=item.entry.input, stamp=item.entry.stamp }, offset=job.offset, length=job.len }, true)
-	else bytes, read_err = require(".actions"):reader(api, item, job.offset, job.len) end
-	return bytes, read_err and fs_error(read_err)
+	-- Yazi 26.9.1 asks for one range at a time.
+	if job.len then
+		if not item then return nil, fs_error(err) end
+		local bytes, read_err = read_range(item, job.offset, job.len)
+		return bytes, read_err and fs_error(read_err)
+	end
+	-- Nightly streams the member from an offset for as long as Yazi keeps reading.
+	return ya.co(function()
+		if not item then return nil, fs_error(err) end
+		local offset, size = job.offset.value, item.entry.size
+		while offset < size do
+			local bytes, read_err = read_range(item, offset, math.min(READ_CHUNK, size - offset))
+			if not bytes then return nil, fs_error(read_err) end
+			if #bytes == 0 then return nil, fs_error(failure("io", "Archive member ended early")) end
+			coroutine.yield(bytes)
+			offset = offset + #bytes
+		end
+	end)
 end
 
 -- Runs a copy request and returns the helper's final report.
@@ -698,8 +736,9 @@ local function destination(target, directory, force, taken)
 	local stem = directory and name or target.stem
 	local extension = not directory and target.ext and ("." .. target.ext) or ""
 	for attempt = 0, 10000 do
-		local candidate = attempt == 0 and Url(target) or parent:join(stem .. "_" .. attempt .. extension)
-		local existing, err = fs.cha(Url(candidate), false)
+		-- Nightly's Url() takes over a Url it receives, so pass Urls on as they are.
+		local candidate = attempt == 0 and target or parent:join(stem .. "_" .. attempt .. extension)
+		local existing, err = stat_at(candidate, false)
 		if not taken[tostring(candidate)] and (force or not existing) then
 			if not existing and err and err.kind ~= "NotFound" then return nil, err end
 			return candidate, nil, existing
@@ -759,7 +798,7 @@ function M:extract_archives(files)
 			local name = require(".actions"):archive_stem(plan.url.name)
 			local folder, folder_err = destination(into:join(name), true, false, {})
 			if not folder then return notify(failure("extract", tostring(folder_err))) end
-			local ok, create_err = fs.create("dir", Url(folder))
+			local ok, create_err = fs.create("dir", folder)
 			if not ok then return notify(failure("extract", tostring(create_err))) end
 			into = folder
 		end
@@ -836,7 +875,7 @@ function M:unpack(targets, force)
 				return false, fs_error(failure("exists", "Destination is not a regular directory"))
 			end
 			if not existing then
-				local ok, create_err = fs.create("dir", Url(output))
+				local ok, create_err = fs.create("dir", output)
 				if not ok then return false, create_err end
 			end
 			local folder = tostring(output.path)
@@ -927,10 +966,10 @@ function M:fetch(job)
 		for _, current in ipairs(job.files) do
 			local archive, member = address(current.url)
 			local entry = lookup(archive, member)
-			if entry and entry.backing and fs.cha(Url(entry.backing)) then
+			if entry and entry.backing and stat_at(Url(entry.backing)) then
 				cached[#cached + 1] = current
 			else
-				local mime = current.cha.is_dir and "folder/archive" or "zippity/member"
+				local mime = stat_of(current).is_dir and "folder/archive" or "zippity/member"
 				if coroutine.yield(current, { mime }) then updates[current.url] = mime end
 			end
 		end
@@ -966,5 +1005,6 @@ api.address, api.is_archive, api.announce = address, is_archive, announce
 api.invalidate, api.search_entries = invalidate, search_entries
 api.track_cache, api.forget, api.cache_dirs = track_cache, forget, cache_dirs
 api.materialize = function(url) return M:materialize(url) end
+api.seconds, api.stat_at = seconds, stat_at
 
 return M

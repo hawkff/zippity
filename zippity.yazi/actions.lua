@@ -173,7 +173,7 @@ end
 
 function A:reader(api, item, offset, length)
 	local current = state_get("readers", item.archive)
-	if not current or current.revision ~= item.record.source.revision or not fs.cha(Url(current.root)) then
+	if not current or current.revision ~= item.record.source.revision or not api.stat_at(Url(current.root)) then
 		if current then api.rpc { op = "clean_cache", directory = current.root } end
 		-- Nothing reads the reader's stderr here, so it must not fill a pipe and block.
 		local child, err = Command("zippity"):arg("--serve"):stdin(Command.PIPED):stdout(Command.PIPED):stderr(Command.NULL):spawn()
@@ -221,7 +221,7 @@ function A:edit(api, archive)
 	if not entries then return api.notify(plan_err) end
 	indicator()
 	state_set("drafts", archive, { source = record.source.archive, revision = record.source.revision,
-		changes = {}, entries = entries, updated = ya.time() })
+		changes = {}, entries = entries, updated = api.seconds(ya.time()) })
 	api.invalidate(archive)
 	ya.emit("refresh", {})
 end
@@ -233,7 +233,7 @@ function A:stage(api, archive, additions)
 	local entries, err = api.rpc { op = "plan", archive = draft.source, revision = draft.revision,
 		password = api.password(archive), changes = draft.changes }
 	if not entries then return api.notify(err) end
-	draft.entries, draft.updated = entries, ya.time()
+	draft.entries, draft.updated = entries, api.seconds(ya.time())
 	state_set("drafts", archive, draft)
 	api.invalidate(archive)
 	ya.emit("refresh", {})

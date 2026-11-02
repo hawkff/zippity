@@ -65,7 +65,7 @@ for _, flag in ipairs({ "write", "append", "truncate", "create", "create_new" })
 	local result, err = plugin:Open { demand = { [flag] = true } }
 	assert(result == nil and err.kind == "PermissionDenied", flag)
 end
-assert(plugin:Capabilities().copy_progressive == false)
+assert(next(plugin:Capabilities()) == nil, "The provider offers no links, trash, or copies")
 
 plugin:entry { args = { "auto-preview" } }
 assert(events[#events].action == "forward", "L must retain native navigation outside archives")
@@ -167,4 +167,61 @@ local tuned = actions:compression("9 method=PPMd dict=256M word=16 solid=off")
 assert(tuned.level == 9 and tuned.method == "ppmd" and tuned.dictionary == "256m" and tuned.word_size == 16 and tuned.solid == "off")
 assert(actions:compression(" 5").level == 5 and not actions:compression("5").method)
 for _, text in ipairs { "fast", "5 speed=fast", "5 word=x", "5 word=16.5", "5 word=-1", "5 word=1e1", "5 method" } do assert(not actions:compression(text), text) end
-print("Lua preview toggling, safety guards, read-only, and cleanup contracts passed")
+
+-- Yazi 26.9.1 lists { file, cha } pairs and reads one range per call. Nightly has Stat,
+-- streams Files and member bytes from an offset, and returns times as Time values.
+local shapes = "/files/shapes.zip"
+local function node(path)
+	local url = { path = shapes .. "/" .. path, base = { path = shapes }, spec = { scheme = "zippity", domain = "archive" } }
+	function url:join(name) return node(path == "" and name or path .. "/" .. name) end
+	return url
+end
+local big, reads = string.rep("z", 1024 * 1024 + 10), {}
+actions.reader = function(_, _, _, offset, length)
+	reads[#reads + 1] = { offset = offset, length = length }
+	return big:sub(offset + 1, offset + length)
+end
+ya.co = function(fn) return coroutine.create(fn) end
+local function drain(co)
+	local items = {}
+	while true do
+		local ok, value, err = coroutine.resume(co)
+		assert(ok, value)
+		if coroutine.status(co) == "dead" then return items, err end
+		items[#items + 1] = value
+	end
+end
+File = function(value) return value end
+for _, nightly in ipairs { false, true } do
+	Stat, Cha = nil, nil
+	if nightly then Stat = function(value) return value end else Cha = function(value) return value end end
+	local shaped = dofile("zippity.yazi/main.lua")
+	state = { archives = { [shapes] = { source = { archive = shapes, revision = "fixture", volumes = {} }, stamps = {},
+		preview_limit = 32 * 1024 * 1024, cache = "/cache", children = { [""] = { "big.bin" } },
+		entries = { [""] = { path = "", directory = true, size = 0 }, ["big.bin"] = { path = "big.bin", size = #big } } } } }
+	assert(next(shaped:Capabilities()) == nil and shaped:Close())
+	local listing, handle = shaped:ReadDir { url = node("") }, shaped:Open { url = node("big.bin"), demand = {} }
+	local metadata = shaped:Metadata { url = node("big.bin") }
+	assert(metadata.len == #big)
+	reads = {}
+	if nightly then
+		local files, err = drain(listing)
+		assert(not err and #files == 1 and files[1].stat.len == #big and files[1].stat == files[1].lstat)
+		assert(handle.random == "read")
+		local chunks, read_err = drain(shaped:Read { url = node("big.bin"), offset = { value = 2 } })
+		assert(not read_err and table.concat(chunks) == big:sub(3))
+		assert(#reads == 2 and reads[1].length == 1024 * 1024 and reads[2].offset == 1024 * 1024 + 2,
+			"Each read stays within the helper's limit")
+		local missing, missing_err = drain(shaped:ReadDir { url = node("absent") })
+		assert(#missing == 0 and missing_err.message:match("missing"), "Listing errors arrive through the stream")
+		ya.time, fs = function() return { unix = 9 } end, { stat = function() end, remove = function() return true end }
+		shaped.extract = function() return #big end
+		assert(shaped:materialize(node("big.bin"), true))
+		assert(state.archives[shapes].entries["big.bin"].cached_at == 9, "Times cross ya.sync as numbers")
+		ya.time = function() return 1 end
+	else
+		assert(#listing == 1 and listing[1].cha.len == #big and listing[1].cha == listing[1].file.cha and handle == 0)
+		assert(shaped:Read { url = node("big.bin"), offset = 2, len = 3 } == "zzz" and #reads == 1)
+	end
+end
+print("Lua preview toggling, safety guards, read-only, cleanup, and provider contracts passed")
