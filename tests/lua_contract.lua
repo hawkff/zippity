@@ -255,7 +255,7 @@ end
 fs = { stat = function() return { len = 1, mtime = 1, ctime = 1 } end }
 local lapsed_url = { path = lapsed .. "/notes.txt", base = { path = lapsed }, spec = { scheme = "zippity", domain = "archive" } }
 for _, case in ipairs { { held = 99, waits = false }, { held = 102, waits = true } } do
-	state, listings, slept, now = { loading = { [lapsed] = case.held } }, 0, 0, 100
+	state, listings, slept, now = { loading = { [lapsed] = { generation = 0, expires = case.held } } }, 0, 0, 100
 	assert(leased:File { url = lapsed_url }, "The member resolves once the claim lapses")
 	assert(listings == 1 and not state.loading[lapsed], "One caller lists the archive")
 	assert((slept > 1.9) == case.waits, "Only a live claim makes the caller wait")
@@ -265,8 +265,13 @@ local margins = {}
 state, listings, now, listing_waits = { loading = {} }, 0, 100, 7
 on_listing_wait = function()
 	now = now + 1
-	margins[#margins + 1] = state.loading[lapsed] - now
+	margins[#margins + 1] = state.loading[lapsed].expires - now
 end
 assert(leased:File { url = lapsed_url } and listings == 1 and #margins == 7)
 for _, margin in ipairs(margins) do assert(margin > 0, "A slow listing keeps its claim") end
+-- A loader whose claim passed to another caller stores nothing and lists again later.
+state, listings, now, listing_waits = { loading = {} }, 0, 100, 1
+on_listing_wait = function() state.loading[lapsed] = { generation = 999, expires = now + 1 } end
+assert(leased:File { url = lapsed_url } and listings == 2 and not state.loading[lapsed],
+	"A superseded loader drops its listing")
 print("Lua preview toggling, safety guards, read-only, cleanup, and provider contracts passed")
