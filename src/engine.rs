@@ -49,8 +49,7 @@ pub fn list(archive: &Path, password: Option<&str>) -> Result<Index> {
     }
     let text = std::str::from_utf8(&output)
         .map_err(|_| Error::new("unsupported", "7zz listing is not valid UTF-8"))?;
-    // 7zz prints this prompt before listings with encrypted headers, even with piped input.
-    let text = text.strip_prefix("\nEnter password:\n").unwrap_or(text);
+    let text = without_password_prompt(text);
     // A single-stream format names its one member after the archive, as 7-Zip does.
     let name = source
         .archive
@@ -80,6 +79,18 @@ pub fn list(archive: &Path, password: Option<&str>) -> Result<Index> {
         hidden: listing.hidden,
         preview_limit: MAX_READ_BYTES,
     })
+}
+
+/// 7zz prints a password prompt before listings with encrypted headers, even with piped
+/// input. Builds that turn off terminal echo, such as Debian's `7zip`, word it differently.
+fn without_password_prompt(text: &str) -> &str {
+    [
+        "\nEnter password:\n",
+        "\nEnter password (will not be echoed):\n",
+    ]
+    .into_iter()
+    .find_map(|prompt| text.strip_prefix(prompt))
+    .unwrap_or(text)
 }
 
 /// Reads the targets of links whose listing does not show them. Links it cannot read, as
@@ -1478,7 +1489,22 @@ fn open_folder(source: &Source, destination: &Path) -> Result<fs::File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{crc32, xad_listing};
+    use super::{crc32, without_password_prompt, xad_listing};
+
+    #[test]
+    fn listings_drop_either_password_prompt() {
+        for prompt in [
+            "\nEnter password:\n",
+            "\nEnter password (will not be echoed):\n",
+        ] {
+            let text = format!("{prompt}--\nPath = a.rar\n");
+            assert_eq!(without_password_prompt(&text), "--\nPath = a.rar\n");
+        }
+        assert_eq!(
+            without_password_prompt("--\nPath = a.rar\n"),
+            "--\nPath = a.rar\n"
+        );
+    }
 
     #[test]
     fn crc32_matches_the_standard_check_value_in_pieces() {
