@@ -736,8 +736,9 @@ local function destination(target, directory, force, taken)
 	local stem = directory and name or target.stem
 	local extension = not directory and target.ext and ("." .. target.ext) or ""
 	for attempt = 0, 10000 do
-		local candidate = attempt == 0 and Url(target) or parent:join(stem .. "_" .. attempt .. extension)
-		local existing, err = stat_at(Url(candidate), false)
+		-- Nightly's Url() takes over a Url it receives, so pass Urls on as they are.
+		local candidate = attempt == 0 and target or parent:join(stem .. "_" .. attempt .. extension)
+		local existing, err = stat_at(candidate, false)
 		if not taken[tostring(candidate)] and (force or not existing) then
 			if not existing and err and err.kind ~= "NotFound" then return nil, err end
 			return candidate, nil, existing
@@ -797,7 +798,7 @@ function M:extract_archives(files)
 			local name = require(".actions"):archive_stem(plan.url.name)
 			local folder, folder_err = destination(into:join(name), true, false, {})
 			if not folder then return notify(failure("extract", tostring(folder_err))) end
-			local ok, create_err = fs.create("dir", Url(folder))
+			local ok, create_err = fs.create("dir", folder)
 			if not ok then return notify(failure("extract", tostring(create_err))) end
 			into = folder
 		end
@@ -874,7 +875,7 @@ function M:unpack(targets, force)
 				return false, fs_error(failure("exists", "Destination is not a regular directory"))
 			end
 			if not existing then
-				local ok, create_err = fs.create("dir", Url(output))
+				local ok, create_err = fs.create("dir", output)
 				if not ok then return false, create_err end
 			end
 			local folder = tostring(output.path)
