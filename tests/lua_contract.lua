@@ -1,5 +1,6 @@
 local state = {}
 local events, notifications, attempts, previews = {}, {}, {}, {}
+local listings = 0
 ya = {
 	sync = function(fn) return function(...) return fn(state, ...) end end,
 	drop = function() end,
@@ -37,6 +38,10 @@ Command = setmetatable({ PIPED = 1, NULL = 2 }, {
 			function child:flush() self.flushed = true; return true end
 			function child:take_stdin() assert(self.flushed); return {} end
 			function child:wait_with_output()
+				if self.request.op == "list" then
+					listings = listings + 1
+					return { status = { success = true }, stdout = "HEAD\nnotes.txt\t0\t5\t\t\t\n" }
+				end
 				assert(self.request.op == "clean_cache")
 				local root = self.request.directory
 				attempts[#attempts + 1] = root
@@ -223,5 +228,26 @@ for _, nightly in ipairs { false, true } do
 		assert(#listing == 1 and listing[1].cha.len == #big and listing[1].cha == listing[1].file.cha and handle == 0)
 		assert(shaped:Read { url = node("big.bin"), offset = 2, len = 3 } == "zzz" and #reads == 1)
 	end
+end
+
+-- A loader that Yazi cancels never stores its listing, so its claim lapses and the next
+-- caller lists the archive itself.
+Cha, Stat = function(value) return value end, nil
+local leased = dofile("zippity.yazi/main.lua")
+local lapsed, now, slept = "/files/lapsed.zip", 100, 0
+ya.time = function() return now end
+ya.sleep = function(duration) now, slept = now + duration, slept + duration end
+ya.json_decode = function(value)
+	if value ~= "HEAD" then return value end
+	return { preview_limit = 1, hidden = 0, source = { archive = lapsed, revision = "fixture", volumes = { { path = lapsed,
+		changed_seconds = 1, changed_nanoseconds = 0, modified_seconds = 1, modified_nanoseconds = 0 } } } }
+end
+fs = { stat = function() return { len = 1, mtime = 1, ctime = 1 } end }
+for _, case in ipairs { { held = 99, waits = false }, { held = 102, waits = true } } do
+	state, listings, slept, now = { loading = { [lapsed] = case.held } }, 0, 0, 100
+	local url = { path = lapsed .. "/notes.txt", base = { path = lapsed }, spec = { scheme = "zippity", domain = "archive" } }
+	assert(leased:File { url = url }, "The member resolves once the claim lapses")
+	assert(listings == 1 and not state.loading[lapsed], "One caller lists the archive")
+	assert((slept > 1.9) == case.waits, "Only a live claim makes the caller wait")
 end
 print("Lua preview toggling, safety guards, read-only, cleanup, and provider contracts passed")

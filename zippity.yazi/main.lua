@@ -97,12 +97,17 @@ local info = ya.sync(function(state, archive)
 	end
 end)
 
+-- Yazi's nightly builds cancel file system jobs they no longer need, and a cancelled
+-- loader never stores its listing. Its claim lapses, and another caller lists instead.
+local CLAIM_SECONDS = 5
+
 local claim = ya.sync(function(state, archive)
 	state.loading = state.loading or {}
-	if state.loading[archive] then
+	local now = seconds(ya.time())
+	if (state.loading[archive] or 0) > now then
 		return false
 	end
-	state.loading[archive] = true
+	state.loading[archive] = now + CLAIM_SECONDS
 	return true
 end)
 
