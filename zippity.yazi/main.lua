@@ -111,6 +111,10 @@ local claim = ya.sync(function(state, archive)
 	return true
 end)
 
+local renew = ya.sync(function(state, archive)
+	if state.loading and state.loading[archive] then state.loading[archive] = seconds(ya.time()) + CLAIM_SECONDS end
+end)
+
 -- Builds an archive's record on Yazi's main thread from the helper's line format, or from
 -- the members of a pending edit session. Handing the members over as one string keeps
 -- ya.sync from converting them one value at a time. Without a head it only releases the
@@ -330,6 +334,35 @@ local function rpc(request, raw)
 	return result, not result and failure("io", tostring(decode_err)) or nil
 end
 
+-- Lists an archive under this caller's claim. The helper prints nothing until the listing
+-- is ready, so each second without a line renews the claim, and a slow listing keeps it.
+local function listing(request, archive)
+	local child, err = spawn(request)
+	if not child then
+		return nil, err
+	end
+	local head, errors = "", ""
+	while true do
+		local line, event = child:read_line_with { timeout = 1000 }
+		if event == 3 then
+			renew(archive)
+		elseif event == 1 then
+			errors = errors .. line
+		else
+			head = line or ""
+			break
+		end
+	end
+	local output, wait_err = child:wait_with_output()
+	if not output then
+		return nil, failure("io", tostring(wait_err))
+	end
+	if not output.status.success then
+		return nil, helper_error(ya.json_decode(errors .. output.stderr)) or failure("io", "Archive helper failed")
+	end
+	return head .. output.stdout
+end
+
 local function stamp(path)
 	local stat = stat_at(Url(path))
 	return stat and { path = path, size = stat.len, mtime = seconds(stat.mtime), ctime = seconds(stat.ctime) }
@@ -354,7 +387,7 @@ local function ensure(archive)
 			return record
 		end
 		if claim(archive) then
-			local text, err = rpc({ op = "list", archive = real, password = password(archive), lines = true }, true)
+			local text, err = listing({ op = "list", archive = real, password = password(archive), lines = true }, archive)
 			local split = text and text:find("\n", 1, true)
 			local head = split and ya.json_decode(text:sub(1, split - 1))
 			if not head then

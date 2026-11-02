@@ -1,6 +1,6 @@
 local state = {}
 local events, notifications, attempts, previews = {}, {}, {}, {}
-local listings = 0
+local listings, listing_waits, on_listing_wait = 0, 0, nil
 ya = {
 	sync = function(fn) return function(...) return fn(state, ...) end end,
 	drop = function() end,
@@ -37,10 +37,20 @@ Command = setmetatable({ PIPED = 1, NULL = 2 }, {
 			function child:write_all(value) self.request = value; return true end
 			function child:flush() self.flushed = true; return true end
 			function child:take_stdin() assert(self.flushed); return {} end
+			-- A listing prints its head line once the helper finishes.
+			function child:read_line_with()
+				assert(self.request.op == "list")
+				if listing_waits > 0 then
+					listing_waits = listing_waits - 1
+					on_listing_wait()
+					return nil, 3
+				end
+				return "HEAD\n", 0
+			end
 			function child:wait_with_output()
 				if self.request.op == "list" then
 					listings = listings + 1
-					return { status = { success = true }, stdout = "HEAD\nnotes.txt\t0\t5\t\t\t\n" }
+					return { status = { success = true }, stdout = "notes.txt\t0\t5\t\t\t\n", stderr = "" }
 				end
 				assert(self.request.op == "clean_cache")
 				local root = self.request.directory
@@ -243,11 +253,20 @@ ya.json_decode = function(value)
 		changed_seconds = 1, changed_nanoseconds = 0, modified_seconds = 1, modified_nanoseconds = 0 } } } }
 end
 fs = { stat = function() return { len = 1, mtime = 1, ctime = 1 } end }
+local lapsed_url = { path = lapsed .. "/notes.txt", base = { path = lapsed }, spec = { scheme = "zippity", domain = "archive" } }
 for _, case in ipairs { { held = 99, waits = false }, { held = 102, waits = true } } do
 	state, listings, slept, now = { loading = { [lapsed] = case.held } }, 0, 0, 100
-	local url = { path = lapsed .. "/notes.txt", base = { path = lapsed }, spec = { scheme = "zippity", domain = "archive" } }
-	assert(leased:File { url = url }, "The member resolves once the claim lapses")
+	assert(leased:File { url = lapsed_url }, "The member resolves once the claim lapses")
 	assert(listings == 1 and not state.loading[lapsed], "One caller lists the archive")
 	assert((slept > 1.9) == case.waits, "Only a live claim makes the caller wait")
 end
+-- A loader whose listing outlasts the claim renews it each second it waits for the helper.
+local margins = {}
+state, listings, now, listing_waits = { loading = {} }, 0, 100, 7
+on_listing_wait = function()
+	now = now + 1
+	margins[#margins + 1] = state.loading[lapsed] - now
+end
+assert(leased:File { url = lapsed_url } and listings == 1 and #margins == 7)
+for _, margin in ipairs(margins) do assert(margin > 0, "A slow listing keeps its claim") end
 print("Lua preview toggling, safety guards, read-only, cleanup, and provider contracts passed")
