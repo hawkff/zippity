@@ -93,11 +93,13 @@ with tempfile.TemporaryDirectory() as temporary:
     members = sorted(str(path.relative_to(selection)) for path in selection.rglob('*') if path.is_file())
     observer = root / 'observer'
     observer.mkdir()
-    log = root / 'calls.log'
+    log, named = root / 'calls.log', root / 'named.log'
     wrapper = observer / '7zz'
     executable = shutil.which('7zz')
+    # Each call logs its command, and how many members it names.
     wrapper.write_text('#!/usr/bin/env python3\nimport os, sys\n'
         f'open({str(log)!r}, "a").write(sys.argv[1] + "\\n")\n'
+        f'open({str(named)!r}, "a").write(str(sum(a.startswith("-i!") for a in sys.argv)) + "\\n")\n'
         f'os.execv({executable!r}, [{executable!r}, *sys.argv[1:]])\n')
     wrapper.chmod(0o700)
     env = {**os.environ, 'PATH': str(observer) + os.pathsep + os.environ['PATH']}
@@ -132,6 +134,36 @@ with tempfile.TemporaryDirectory() as temporary:
         if suffix in ('7z', 'tar.gz'):
             folder = (output / 'folder0').stat()
             assert folder.st_mode & 0o777 == 0o750 and abs(folder.st_mtime - 1_500_000_000) < 1, (suffix, oct(folder.st_mode))
+        # Every file of the archive at once is one pass that names none of them.
+        output = root / ('everything-' + suffix)
+        for folder in ('folder0', 'folder1', 'folder2'):
+            (output / folder).mkdir(parents=True)
+        log.write_text('')
+        named.write_text('')
+        result = request({'op':'copy_many','archive':str(archive),'revision':revision,
+            'files':[{'member':member,'destination':str(output / member)} for member in reversed(members)]}, env=env)
+        total = sum((selection / member).stat().st_size for member in members)
+        assert json.loads(result.stdout.splitlines()[-1]) == {'done': total, 'damaged': [], 'lost': [], 'partial': []}
+        assert all((output / member).read_bytes() == (selection / member).read_bytes() for member in members), suffix
+        calls = collections.Counter(log.read_text().split())
+        assert calls == {'l': 1, 'x': 3 if suffix == 'tar.gz' else 1}, (suffix, calls)
+        assert set(named.read_text().split()) == {'0'}, (suffix, named.read_text())
+    # A pass without names would also write the members a listing leaves out, so a selection
+    # of every listed file beside Finder metadata or a hidden member still names its members.
+    for extra in ('__MACOSX/._a.txt', '../outside.txt'):
+        partly = root / 'partly-listed.zip'
+        with zipfile.ZipFile(partly, 'w') as archive:
+            for name, content in ((extra, 'left out'), ('a.txt', 'first\n'), ('b.txt', 'second\n')):
+                archive.writestr(name, content)
+        index = json.loads(request({'op':'list','archive':str(partly)}).stdout)
+        assert [entry['path'] for entry in index['entries']] == ['a.txt', 'b.txt'], index['entries']
+        named.write_text('')
+        files = [{'member':name,'destination':str(root / ('partly-' + name))} for name in ('a.txt', 'b.txt')]
+        result = request({'op':'copy_many','archive':str(partly),'revision':index['source']['revision'],'files':files,'overwrite':True}, env=env)
+        assert json.loads(result.stdout.splitlines()[-1])['done'] == 13
+        # The listing names nothing; the one pass for the copies names both.
+        assert named.read_text().split()[:2] == ['0', '2'], (extra, named.read_text())
+        assert (root / 'partly-a.txt').read_text() == 'first\n' and (root / 'partly-b.txt').read_text() == 'second\n'
 
     disc = root / 'batch.iso'
     disc.write_bytes(gzip.decompress((Path(__file__).resolve().parent / 'fixtures' / 'iso9660.iso.gz').read_bytes()))
