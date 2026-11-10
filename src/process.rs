@@ -199,6 +199,9 @@ pub fn run<W: Write + Send>(
             })
             .collect();
         let started = Instant::now();
+        // A listing or a small member takes 7zz a few milliseconds, so the first looks come
+        // a millisecond apart and each pause is one longer, up to the 20 ms of a long run.
+        let mut pause = Duration::from_millis(1);
         let status = loop {
             let failure = if crate::cancelled() {
                 Some(Error::new("cancelled", "Archive operation cancelled"))
@@ -238,7 +241,8 @@ pub fn run<W: Write + Send>(
             if complete {
                 break Ok(success);
             }
-            thread::sleep(Duration::from_millis(20));
+            thread::sleep(pause);
+            pause = (pause + Duration::from_millis(1)).min(Duration::from_millis(20));
         };
         let count = reader
             .join()

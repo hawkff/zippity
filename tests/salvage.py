@@ -10,8 +10,8 @@ import tempfile
 REPO = Path(__file__).resolve().parents[1]
 BINARY = REPO / 'target/debug/zippity'
 
-# Emits selected members in listing order. "crc" damage writes the full size with wrong
-# bytes; "short" writes half and, in a 7z block, nothing more for the rest of the block
+# Emits selected members in listing order, or every member when none is named. "crc"
+# damage writes the full size with wrong bytes; "short" writes half and, in a 7z block, nothing more for the rest of the block
 # (7zExtract.cpp, CFolderOutStream::FlushCorrupted), while RAR keeps decoding later
 # members; "empty" writes nothing for that member alone; "memory" stops the whole run the
 # way 7zz does when it cannot allocate a decoder.
@@ -33,7 +33,7 @@ selected = {argument[3:] for argument in sys.argv if argument.startswith('-i!')}
 dead, failed = set(), []
 for member in script['members']:
     data, group, damage = member['content'].encode(), member.get('group'), member.get('damage')
-    chosen = member['name'] in selected
+    chosen = not selected or member['name'] in selected
     if group is not None and group in dead:
         if chosen:
             failed.append(member['name'])
