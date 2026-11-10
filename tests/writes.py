@@ -93,6 +93,11 @@ with tempfile.TemporaryDirectory() as temporary:
         assert index['entries'][0]['size'] == 3 * 1024 * 1024
         call('create', good=False, sources=[str(source / 'random.bin')], destination=str(directory), format=format,
             options={'level':0, 'volume_bytes':1024 * 1024}, password=None)
+    # A set whose name starts with `._` is not taken for the attribute files macOS keeps
+    # beside files on FAT volumes.
+    dotted = call('create', sources=[str(source / 'random.bin')], destination=str(root / '._dotted.7z.parts'), format='7z',
+        options={'level':0, 'volume_bytes':1024 * 1024}, password=None)
+    assert Path(dotted['path']).name == '._dotted.7z.001', dotted
     readonly = root / 'readonly'
     readonly.mkdir()
     (readonly / 'data.txt').write_text('Private staged input.\n')
@@ -284,6 +289,21 @@ with tempfile.TemporaryDirectory() as temporary:
     parent = next(e for e in saved['entries'] if e['path'] == 'outer')
     original = next(e for e in index['entries'] if e['path'] == 'outer')
     assert (parent['mode'], parent['modified']) == (original['mode'], original['modified'])
+
+    # 7zz and rar trim and unquote the lines of a list of inputs; the names keep both.
+    odd = root / 'odd-names'
+    odd.mkdir()
+    spaced = [' lead.txt', 'trail.txt ', '"quoted"', '"both" ']
+    for name in spaced:
+        (odd / name).write_text(name)
+    for format in formats:
+        archive = root / ('odd.' + format)
+        call('create', sources=[str(odd / name) for name in spaced[:3]], destination=str(archive), format=format, options={'level':5})
+        index = call('list', archive=str(archive))
+        assert {e['path'] for e in index['entries']} == set(spaced[:3]), (format, index['entries'])
+        saved = call('apply', archive=str(archive), revision=index['source']['revision'], changes=call('stage', sources=[str(odd / spaced[3])]))
+        assert {e['path'] for e in saved['entries']} == set(spaced), (format, saved['entries'])
+        assert call('read', archive=str(archive), revision=saved['source']['revision'], member=spaced[1], offset=0, length=100) == spaced[1].encode()
 
     if 'rar' in formats:
         names = root / 'literal-names'

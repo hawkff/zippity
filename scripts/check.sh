@@ -18,6 +18,7 @@ python3 tests/compressed.py
 python3 tests/containers.py
 python3 tests/links.py
 python3 tests/finder.py
+python3 tests/publish.py
 python3 tests/kept_listing.py
 cargo build --release --locked
 python3 tests/bench.py
