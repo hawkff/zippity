@@ -331,7 +331,8 @@ Keep all volumes of a multipart archive in one folder. Zippity opens these sets:
 - Numbered `.001` sets that 7zz writes.
 - [Info-ZIP](https://infozip.sourceforge.net/) spanned sets (`.z01`, `.z02`, and so on, with the last part named `.zip`), from any segment.
 
-A missing or ambiguous volume stops with an error.
+A missing or ambiguous volume stops with an error. A numbered file with no first volume
+beside it, such as `notes.2024` or `game.x86`, is not an archive volume.
 
 ### Permissions and times
 
@@ -366,8 +367,9 @@ an unchanged archive skip listing it again.
 Tar archives stream through the decompressor and tar reader, so they need no unpacked
 copy. To reach a member of a solid 7z or RAR archive or a compressed tar, Zippity may
 still have to decode the data before it. Paste lists each archive once and decodes all of
-its selected members in one pass, though a selection of thousands of members can take a
-few passes.
+its selected members in one pass. A selection of thousands of members can take a few
+passes. A whole archive takes one, unless it holds links, Finder metadata, or members the
+listing hides.
 
 If Yazi reads a member directly, Zippity starts a private reader for that archive. The
 reader keeps its decoder open for sequential reads, uses bounded buffers, and restarts
@@ -457,7 +459,10 @@ The destination defaults to the source's folder and name with the new extension,
 their modification times and permissions into private staging beside the destination,
 checks them, and removes the staging afterwards. Finder metadata, such as `.DS_Store`
 members and `__MACOSX` entries, comes along, and so do links. Save As refuses archives
-with hidden members, nested archives, and archives with unsaved edits.
+with hidden members, nested archives, and archives with unsaved edits. On macOS it also
+refuses a destination on an exFAT or FAT volume. macOS keeps each file's attributes there
+in a `._name` file beside it, which Save As couldn't tell from the `._name` members an
+archive holds. Save to another volume and move the archive.
 
 ## Finder tags and icons
 
@@ -513,6 +518,9 @@ Removing files doesn't securely erase them from disk.
   writes. Compressed-tar traversal and writes get one hour.
 - The one-shot read command reads members up to 32 MiB. The private reader handles
   larger reads.
+- On exFAT and FAT volumes, macOS can't rename a file without replacing one. Zippity
+  takes the free name with an empty file, then moves the finished copy over it. A
+  program that writes the same name between those two steps loses its file.
 - You can't edit existing split sets or nested archives in place. Extract them to a
   standalone archive first.
 - Some actions take several passes over the archive, so large edit batches and random
