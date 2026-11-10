@@ -1,7 +1,7 @@
 # zippity.yazi
 
-Archive browsing and transactional management for Yazi 26.9.1, and Yazi nightly builds
-from 2026-11-02, on Linux and macOS.
+Archive browsing and transactional management for Yazi 26.9.1 and the Yazi nightly build
+of 2026-11-10, on Linux and macOS.
 Requires the `zippity` helper and `7zz` on PATH. RAR writing also needs a separately
 installed, appropriately licensed `rar` executable.
 

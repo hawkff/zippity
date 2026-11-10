@@ -72,8 +72,8 @@ CRCs, and add no checksums of their own.
 
 ## Requirements
 
-- [Yazi](https://yazi-rs.github.io/docs/installation) 26.9.1, or a nightly build from
-  2026-11-02. Its custom filesystem API is experimental, so other versions need testing
+- [Yazi](https://yazi-rs.github.io/docs/installation) 26.9.1, or the nightly build of
+  2026-11-10. Yazi's custom filesystem API is experimental, so other versions need testing
   first.
 - The official 7-Zip `7zz` on PATH. The test suite runs against 7-Zip 26.05 and Debian
   13's 7zip 25.01.
