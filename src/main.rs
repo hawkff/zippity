@@ -116,14 +116,6 @@ enum Request {
         revision: String,
         password: Option<String>,
     },
-    Read {
-        archive: PathBuf,
-        member: String,
-        revision: String,
-        password: Option<String>,
-        offset: u64,
-        length: usize,
-    },
     Copy {
         archive: PathBuf,
         member: String,
@@ -175,7 +167,7 @@ fn main() -> ExitCode {
         }
         if argument == "--help" || argument == "-h" {
             println!(
-                "zippity: archive browsing and transactional management for Yazi\n\nSend one JSON request on stdin. Operations include list, check, read, copy, stage, plan, apply, create, and cache management.\n--serve starts a private session reader.\nPasswords belong in stdin, never command-line arguments.\nRequires 7zz; RAR writing also requires a separately installed rar."
+                "zippity: archive browsing and transactional management for Yazi\n\nSend one JSON request on stdin. Operations include list, check, copy, stage, plan, apply, create, and cache management.\n--serve starts a private session reader.\nPasswords belong in stdin, never command-line arguments.\nRequires 7zz; RAR writing also requires a separately installed rar."
             );
             return ExitCode::SUCCESS;
         }
@@ -454,24 +446,6 @@ fn execute() -> Result<()> {
         } => {
             engine::verify(&archive, &revision, password.as_deref())?;
             writeln!(std::io::stdout().lock(), "{{\"verified\":true}}")?;
-        }
-        Request::Read {
-            archive,
-            member,
-            revision,
-            password,
-            offset,
-            length,
-        } => {
-            let bytes = engine::read(
-                &archive,
-                &member,
-                &revision,
-                password.as_deref(),
-                offset,
-                length,
-            )?;
-            std::io::stdout().lock().write_all(&bytes)?;
         }
         Request::Copy {
             archive,

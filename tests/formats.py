@@ -66,8 +66,6 @@ with tempfile.TemporaryDirectory() as temporary:
         revision = listing['source']['revision']
         request({'op':'check','archive':str(archive),'revision':revision})
         for member, content in [('notes.txt', b'ISO archive preview.\n'), ('folder/file name.txt', b'Nested ISO content.\n')]:
-            response = request({'op':'read','archive':str(archive),'revision':revision,'member':member,'offset':2,'length':8})
-            assert response.stdout == content[2:10]
             destination = root / (kind + '-' + Path(member).name)
             request({'op':'copy','archive':str(archive),'revision':revision,'member':member,'destination':str(destination)})
             assert destination.read_bytes() == content

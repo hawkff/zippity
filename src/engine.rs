@@ -448,58 +448,6 @@ fn member<'a>(index: &'a Index, path: &str, revision: &str) -> Result<&'a Entry>
         .ok_or_else(|| Error::new("missing", "Archive member is missing or is a directory"))
 }
 
-pub fn read(
-    archive: &Path,
-    path: &str,
-    revision: &str,
-    password: Option<&str>,
-    offset: u64,
-    length: usize,
-) -> Result<Vec<u8>> {
-    if length > 1024 * 1024 {
-        return Err(Error::new("limit", "Read requests are limited to 1 MiB"));
-    }
-    let index = list(archive, password)?;
-    let entry = member(&index, path, revision)?;
-    if entry.link.is_some() {
-        return Err(link_unreadable());
-    }
-    if index.source.format == Format::Unar {
-        return Err(unstreamed());
-    }
-    if entry.unknown_size {
-        return Err(size_unknown());
-    }
-    if entry.size > MAX_READ_BYTES {
-        return Err(Error::new(
-            "limit",
-            "Large members require an explicit preview or copy",
-        ));
-    }
-    if offset >= entry.size || length == 0 {
-        return Ok(Vec::new());
-    }
-    let mut bytes = Vec::new();
-    let count = run(
-        &index.source,
-        &[entry.original_path.as_str()],
-        password,
-        &mut bytes,
-        entry.size,
-        false,
-    )?;
-    if count != entry.size {
-        return Err(Error::new(
-            "archive",
-            "Extracted size does not match the archive listing",
-        ));
-    }
-    index.source.unchanged()?;
-    let start = offset as usize;
-    let end = (start + length).min(bytes.len());
-    Ok(bytes[start..end].to_vec())
-}
-
 /// An archive member and the local path it is copied to.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

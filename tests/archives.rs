@@ -29,6 +29,21 @@ fn index(archive: &Path) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+/// Copies `member` out, and returns the helper's result with what the copy holds.
+fn extract(
+    archive: &Path,
+    member: &str,
+    listing: &Value,
+    password: Option<&str>,
+) -> (Output, Vec<u8>) {
+    let out = tempfile::tempdir().unwrap();
+    let destination = out.path().join("member");
+    let output = invoke(json!({"op":"copy", "archive":archive, "member":member,
+        "revision":listing["source"]["revision"], "password":password,
+        "destination":destination}));
+    (output, fs::read(destination).unwrap_or_default())
+}
+
 fn fixture(encrypted: bool, large: bool) -> (TempDir, std::path::PathBuf) {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
@@ -70,7 +85,7 @@ fn fixture(encrypted: bool, large: bool) -> (TempDir, std::path::PathBuf) {
 }
 
 #[test]
-fn lists_and_reads_literal_member_names_without_extracting_the_archive() {
+fn lists_and_copies_literal_member_names_without_touching_the_archive() {
     let (root, archive) = fixture(false, false);
     let original = fs::read(&archive).unwrap();
     let listing = index(&archive);
@@ -87,14 +102,13 @@ fn lists_and_reads_literal_member_names_without_extracting_the_archive() {
         ("資料/é.txt", "unicode\n"),
         ("2024-01-01 10:30.log", "literal colon\n"),
     ] {
-        let output = invoke(json!({"op":"read", "archive":archive, "member":member,
-            "revision":listing["source"]["revision"], "offset":0, "length":1024}));
+        let (output, copied) = extract(&archive, member, &listing, None);
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(output.stdout, expected.as_bytes());
+        assert_eq!(copied, expected.as_bytes());
     }
     assert_eq!(fs::read(&archive).unwrap(), original);
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
@@ -157,8 +171,7 @@ fn damaged_members_with_password_like_names_report_damage() {
     bytes[data] ^= 1;
     fs::write(&archive, bytes).unwrap();
     let listing = index(&archive);
-    let output = invoke(json!({"op":"read", "archive":archive, "member":member,
-        "revision":listing["source"]["revision"], "offset":0, "length":64}));
+    let (output, _) = extract(&archive, member, &listing, None);
     assert!(!output.status.success());
     let error: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(error["kind"], "damaged");
@@ -185,14 +198,11 @@ fn copying_cannot_overwrite_an_archive_or_an_unapproved_destination() {
 }
 
 #[test]
-fn large_members_copy_with_progress_but_refuse_implicit_reads() {
+fn large_members_copy_with_progress() {
     let (root, archive) = fixture(false, true);
     let listing = index(&archive);
     let destination = root.path().join("large.bin");
-    let mut request = json!({"op":"read", "archive":archive, "member":"large.bin",
-        "revision":listing["source"]["revision"], "offset":0, "length":1024});
-    assert!(!invoke(request.clone()).status.success());
-    request = json!({"op":"copy", "archive":archive, "member":"large.bin",
+    let request = json!({"op":"copy", "archive":archive, "member":"large.bin",
         "revision":listing["source"]["revision"], "destination":destination});
     let output = invoke(request);
     assert!(
@@ -281,19 +291,13 @@ fn reads_rar4_and_rar5_with_encrypted_headers_and_solid_blocks() {
                 } else {
                     "password"
                 };
-                let output = invoke(json!({"op":"read", "archive":archive, "member":name,
-                    "revision":listing["source"]["revision"], "password":password,
-                    "offset":0, "length":1024}));
+                let (output, copied) = extract(&archive, name, &listing, Some(password));
                 assert!(
                     output.status.success(),
                     "{archive:?}/{name}: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
-                assert!(
-                    output
-                        .stdout
-                        .starts_with(format!("This is from {name}").as_bytes())
-                );
+                assert!(copied.starts_with(format!("This is from {name}").as_bytes()));
             }
         }
     }

@@ -1048,7 +1048,7 @@ end
 function M:seek() end
 
 api.context, api.selection, api.clipboard = context, selection, clipboard
-api.rpc, api.ensure, api.info, api.locate = rpc, ensure, info, locate
+api.rpc, api.ensure, api.locate = rpc, ensure, locate
 api.password, api.prompt, api.notify = password, prompt, notify
 api.address, api.is_archive, api.announce = address, is_archive, announce
 api.invalidate, api.search_entries = invalidate, search_entries
