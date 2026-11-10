@@ -48,6 +48,10 @@ with tempfile.TemporaryDirectory() as temporary:
         assert os.readlink(whole / 'dir/up') == '../dir/sub'
         # zchain comes after rel, so its last step is a link this extraction made.
         assert os.readlink(whole / 'dir/zchain') == 'rel' and (whole / 'dir/zchain').read_text() == 'data\n'
+        # Extracting again with overwrite replaces the links the first extraction made.
+        report = call('copy_many', archive=str(archive), revision=revision, files=files, root=str(whole), overwrite=True)
+        assert report.get('skipped', []) == [] and report['done'] == len('data\n'), report
+        assert os.readlink(whole / 'dir/zchain') == 'rel' and (whole / 'dir/zchain').read_text() == 'data\n'
         # The folder's members alone: up would climb out of the destination, rel stays inside.
         alone = root / f'alone-{format}'
         alone.mkdir()

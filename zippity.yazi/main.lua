@@ -24,7 +24,6 @@ for suffix in ([[zip zipx jar apk aar cbz epub xpi ipa appx rar cbr 7z tar tgz t
 
 local function supported(name)
 	name = name:lower()
-	if name:match("%.[r-z]%d%d$") or name:match("%.00%d$") then return true end
 	return SUFFIXES[name:match("%.([^.]+%.[^.]+)$") or ""] or SUFFIXES[name:match("%.([^.]+)$") or ""] or false
 end
 local DIRECTORY_MODE = tonumber("40555", 8)

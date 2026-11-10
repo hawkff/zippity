@@ -502,14 +502,29 @@ impl Drop for StagedDirectories {
 }
 
 fn publish_new(source: &Path, destination: &Path) -> Result<()> {
+    use rustix::{fs::CWD, io::Errno};
+    // Another writer took the name after the early check.
+    let exists = || Error::new("exists", "Archive destination already exists");
     let flags = rustix::fs::RenameFlags::NOREPLACE;
-    rustix::fs::renameat_with(rustix::fs::CWD, source, rustix::fs::CWD, destination, flags)
-        .map_err(|err| match err {
-            // Another writer took the name after the early check.
-            rustix::io::Errno::EXIST => Error::new("exists", "Archive destination already exists"),
-            err => Error::from(std::io::Error::from(err)),
-        })?;
-    Ok(())
+    match rustix::fs::renameat_with(CWD, source, CWD, destination, flags) {
+        Ok(()) => Ok(()),
+        Err(Errno::EXIST) => Err(exists()),
+        // A volume that cannot rename without replacing; see `engine::claim`.
+        Err(Errno::NOTSUP) => {
+            let folder = source.is_dir();
+            engine::claim(destination, folder).map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    exists()
+                } else {
+                    err.into()
+                }
+            })?;
+            fs::rename(source, destination)
+                .inspect_err(|_| engine::release(destination, folder))?;
+            Ok(())
+        }
+        Err(err) => Err(std::io::Error::from(err).into()),
+    }
 }
 
 fn options(
@@ -726,8 +741,12 @@ fn add_staged(
     settings: &Options,
     password: Option<&str>,
 ) -> Result<()> {
+    remove_attribute_files(inputs, names.iter().map(String::as_str))?;
     let list = tempfile::NamedTempFile::new_in(inputs.parent().expect("staging parent"))?;
-    fs::write(list.path(), names.join("\n"))?;
+    // 7zz and rar trim each line of a list and drop one pair of quotes around it, so every
+    // name goes in quotes and keeps its own leading and trailing spaces and quotes.
+    let lines: String = names.iter().map(|name| format!("\"{name}\"\n")).collect();
+    fs::write(list.path(), lines)?;
     let mut command = base_command(format, "a");
     options(&mut command, format, settings, password)?;
     // Staged links are stored as links.
@@ -745,6 +764,58 @@ fn add_staged(
         .arg(archive)
         .arg(format!("@{}", list.path().display()));
     run(command, password)
+}
+
+/// Whether `path` is a `._name` file beside a `name`. On exFAT and FAT volumes macOS keeps
+/// the attributes of a file, which every file it writes has, in such a file.
+fn attribute_file(path: &Path) -> bool {
+    let name = path.file_name().and_then(|name| name.to_str());
+    name.and_then(|name| name.strip_prefix("._"))
+        .filter(|name| !name.is_empty())
+        .is_some_and(|name| fs::symlink_metadata(path.with_file_name(name)).is_ok())
+}
+
+/// Removes the attribute files macOS added in `staging`, which an archiver that is given a
+/// folder would add with it. A `staged` file with such a name stays. It is known by what
+/// the volume holds under its name, since a volume may spell a name in another Unicode form.
+fn remove_attribute_files<'a>(staging: &Path, staged: impl Iterator<Item = &'a str>) -> Result<()> {
+    let mut own = BTreeSet::new();
+    for name in staged {
+        let last = name.rsplit('/').next().unwrap_or(name);
+        if last.starts_with("._") {
+            let meta = fs::symlink_metadata(staging.join(name))?;
+            own.insert((meta.dev(), meta.ino()));
+        }
+    }
+    // Folders inside come first. Removing a file changes its folder's time, and setting that
+    // time back makes macOS add the folder's own attribute file beside it.
+    fn clean(folder: &Path, own: &BTreeSet<(u64, u64)>) -> Result<()> {
+        let modified = fs::metadata(folder)?.modified()?;
+        for entry in fs::read_dir(folder)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                clean(&entry.path(), own)?;
+            }
+        }
+        let mut removed = false;
+        for entry in fs::read_dir(folder)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() || !attribute_file(&path) {
+                continue;
+            }
+            let meta = entry.metadata()?;
+            if !own.contains(&(meta.dev(), meta.ino())) {
+                fs::remove_file(&path)?;
+                removed = true;
+            }
+        }
+        if removed {
+            fs::File::open(folder)?.set_modified(modified)?;
+        }
+        Ok(())
+    }
+    clean(staging, &own)
 }
 
 fn store_implicit_directories(
@@ -873,6 +944,7 @@ pub fn create(
         let mut paths: Vec<_> = fs::read_dir(&output)?
             .map(|e| e.map(|e| e.path()))
             .collect::<std::io::Result<_>>()?;
+        paths.retain(|path| !attribute_file(path));
         paths.sort();
         paths
             .into_iter()
@@ -966,6 +1038,23 @@ pub fn convert(
         return Err(Error::new("empty", "The archive has no members to save"));
     }
     let staging = private_directory(&parent)?;
+    // In this staging the `._name` files macOS adds on exFAT and FAT volumes could not be
+    // told from the `._name` members an archive holds, and could take their place.
+    let probe = staging.path().join("probe");
+    fs::write(&probe, "probe")?;
+    let shadowed = match fs::symlink_metadata(staging.path().join("._probe")) {
+        Ok(_) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(err.into()),
+    };
+    fs::remove_file(&probe)?;
+    let _ = fs::remove_file(staging.path().join("._probe"));
+    if shadowed {
+        return Err(Error::new(
+            "unsupported",
+            "This volume keeps file attributes in separate files, so Save As cannot stage copies on it; save to another volume",
+        ));
+    }
     // Dropped before `staging`, so read-only folders cannot keep it from being removed.
     let mut staged = StagedDirectories(Vec::new());
     let (mut files, mut directories) = (Vec::new(), Vec::new());
@@ -1383,6 +1472,35 @@ mod tests {
             to: "c".into(),
         };
         assert_eq!(paths(rename), ["a-b", "a.b", "a0", "c", "c/b"]);
+    }
+
+    #[test]
+    fn staging_drops_the_attribute_files_it_did_not_stage() {
+        let root = tempfile::tempdir().unwrap();
+        let names = [
+            "a.txt",
+            "._a.txt",
+            "staged",
+            "._staged",
+            "._alone",
+            "dir/b.txt",
+            "dir/._b.txt",
+        ];
+        for name in names {
+            let path = root.path().join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "x").unwrap();
+        }
+        let folder = fs::File::open(root.path().join("dir")).unwrap();
+        let old = UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        folder.set_modified(old).unwrap();
+        let staged = ["a.txt", "staged", "._staged", "dir", "dir/b.txt"];
+        remove_attribute_files(root.path(), staged.into_iter()).unwrap();
+        let left = |name: &str| root.path().join(name).exists();
+        // A staged file stays, and so does a file that sits beside no file of its name.
+        assert!(left("a.txt") && left("._staged") && left("._alone") && left("dir/b.txt"));
+        assert!(!left("._a.txt") && !left("dir/._b.txt"));
+        assert_eq!(folder.metadata().unwrap().modified().unwrap(), old);
     }
 
     #[test]

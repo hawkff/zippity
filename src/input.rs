@@ -49,7 +49,7 @@ pub fn copy(
         return Err(Error::new("request", "Expected an added file"));
     };
     validate_input(change)?;
-    let before = engine::destination_stamp(destination)?;
+    let before = engine::destination_stamp(destination, false)?;
     if before.is_some() && !overwrite {
         return Err(Error::new("exists", "Destination exists"));
     }
@@ -84,7 +84,7 @@ pub fn copy(
     )?;
     source.unchanged()?;
     source.check_destination(destination)?;
-    if engine::destination_stamp(destination)? != before {
+    if engine::destination_stamp(destination, false)? != before {
         return Err(Error::new("changed", "Destination changed during copy"));
     }
     engine::publish(temporary.into_temp_path(), destination, before.is_some())?;

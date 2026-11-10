@@ -528,7 +528,12 @@ impl Pending<'_> {
             .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
             .open(&self.temporary)?;
         let metadata = file.metadata()?;
-        if (metadata.dev(), metadata.ino()) != self.identity {
+        // exFAT and FAT volumes on macOS give a file another number once it holds data.
+        // They ignore ownership, so they keep no other user out and the number guards
+        // nothing there. The device must match in any case: a file on another volume, as
+        // behind a folder swapped for a link, is never the temporary file.
+        let (device, number) = self.identity;
+        if metadata.dev() != device || (metadata.ino() != number && !ownerless(&file)) {
             return Err(std::io::Error::other("A temporary file was replaced"));
         }
         Ok(file)
@@ -561,6 +566,18 @@ impl Pending<'_> {
             crc = crc32(crc, &buffer[..count]);
         }
     }
+}
+
+/// Whether `file` is on a volume that ignores ownership, as macOS mounts exFAT and FAT.
+#[cfg(target_os = "macos")]
+fn ownerless(file: &fs::File) -> bool {
+    const MNT_IGNORE_OWNERSHIP: u32 = 0x0020_0000;
+    rustix::fs::fstatfs(file).is_ok_and(|volume| volume.f_flags & MNT_IGNORE_OWNERSHIP != 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ownerless(_file: &fs::File) -> bool {
+    false
 }
 
 const CRC_TABLE: [u32; 256] = {
@@ -655,7 +672,7 @@ pub fn copy_many(
     for target in files {
         let entry = member(&index, &target.member, revision)?;
         index.source.check_destination(&target.destination)?;
-        let before = destination_stamp(&target.destination)?;
+        let before = destination_stamp(&target.destination, entry.link.is_some())?;
         if before.is_some() && !flags.overwrite {
             return Err(Error::new("exists", "Destination exists"));
         }
@@ -814,7 +831,7 @@ pub fn copy_many(
         match states[i] {
             State::Copied => {
                 index.source.check_destination(copy.destination)?;
-                if destination_stamp(copy.destination)? != copy.before {
+                if destination_stamp(copy.destination, false)? != copy.before {
                     return Err(Error::new(
                         "changed",
                         "Destination changed during extraction",
@@ -842,10 +859,10 @@ pub fn copy_many(
     for copy in sidecars {
         let mut path = copy.destination.as_os_str().to_owned();
         path.push(".damaged");
-        match copy.temporary.persist_noclobber(&path) {
+        match publish(copy.temporary, Path::new(&path), false) {
             Ok(()) => report.partial.push(path.into()),
-            Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(err) => return Err(err.error.into()),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err.into()),
         }
     }
     // Links come after the copies, and only where their targets stay inside `root`.
@@ -856,7 +873,7 @@ pub fn copy_many(
             continue;
         }
         index.source.check_destination(&target.destination)?;
-        if destination_stamp(&target.destination)? != before {
+        if destination_stamp(&target.destination, true)? != before {
             return Err(Error::new(
                 "changed",
                 "Destination changed during extraction",
@@ -1269,13 +1286,59 @@ pub(crate) fn finish(
 }
 
 /// Move a finished copy into place, replacing only a destination that existed before.
-pub(crate) fn publish(temporary: TempPath, destination: &Path, replace: bool) -> Result<()> {
-    let persisted = if replace {
-        temporary.persist(destination)
-    } else {
-        temporary.persist_noclobber(destination)
+pub(crate) fn publish(
+    temporary: TempPath,
+    destination: &Path,
+    replace: bool,
+) -> std::io::Result<()> {
+    if replace {
+        return temporary
+            .persist(destination)
+            .map_err(|failed| failed.error);
+    }
+    let failed = match temporary.persist_noclobber(destination) {
+        Ok(()) => return Ok(()),
+        Err(failed) => failed,
     };
-    persisted.map_err(|e| e.error.into())
+    if rustix::io::Errno::from_io_error(&failed.error) != Some(rustix::io::Errno::NOTSUP) {
+        return Err(failed.error);
+    }
+    claim(destination, false)?;
+    failed.path.persist(destination).map_err(|failed| {
+        release(destination, false);
+        failed.error
+    })
+}
+
+/// Takes the free name `destination` with an empty file, or an empty folder, for a rename
+/// to replace. exFAT and FAT volumes on macOS can neither rename without replacing, nor
+/// swap two names, nor link, so this is how a new file or folder takes only a free name
+/// there.
+// shortcut: a writer that replaces the claimed name before the rename loses its file; write
+// into the claimed file instead if that moment ever matters more than writing the data twice.
+pub(crate) fn claim(destination: &Path, folder: bool) -> std::io::Result<()> {
+    if folder {
+        fs::create_dir(destination)
+    } else {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .map(drop)
+    }
+}
+
+/// Removes a claim whose rename failed, while it still is the empty file or folder it was.
+pub(crate) fn release(destination: &Path, folder: bool) {
+    let empty = |meta: fs::Metadata| meta.is_file() && meta.len() == 0;
+    let _ = if folder {
+        // Only an empty folder can be removed this way.
+        fs::remove_dir(destination)
+    } else if fs::symlink_metadata(destination).is_ok_and(empty) {
+        fs::remove_file(destination)
+    } else {
+        Ok(())
+    };
 }
 
 #[derive(PartialEq)]
@@ -1288,9 +1351,11 @@ pub(crate) struct DestinationStamp {
     pub mode: u32,
 }
 
-pub(crate) fn destination_stamp(path: &Path) -> Result<Option<DestinationStamp>> {
+/// What `path` holds before a copy replaces it: a regular file or, for a `link`, also a
+/// symbolic link, such as the one an earlier extraction made.
+pub(crate) fn destination_stamp(path: &Path, link: bool) -> Result<Option<DestinationStamp>> {
     match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => Ok(Some(DestinationStamp {
+        Ok(meta) if meta.is_file() || (link && meta.is_symlink()) => Ok(Some(DestinationStamp {
             device: meta.dev(),
             inode: meta.ino(),
             size: meta.len(),
@@ -1489,7 +1554,26 @@ fn open_folder(source: &Source, destination: &Path) -> Result<fs::File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{crc32, without_password_prompt, xad_listing};
+    use super::{claim, crc32, release, without_password_prompt, xad_listing};
+
+    #[test]
+    fn a_claim_is_released_only_while_it_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, folder) = (dir.path().join("file"), dir.path().join("folder"));
+        for replaced in [false, true] {
+            claim(&file, false).unwrap();
+            claim(&folder, true).unwrap();
+            assert!(claim(&file, false).is_err() && claim(&folder, true).is_err());
+            if replaced {
+                // Something else now holds each name.
+                std::fs::write(&file, "data").unwrap();
+                std::fs::write(folder.join("inside"), "data").unwrap();
+            }
+            release(&file, false);
+            release(&folder, true);
+            assert_eq!((file.exists(), folder.exists()), (replaced, replaced));
+        }
+    }
 
     #[test]
     fn listings_drop_either_password_prompt() {

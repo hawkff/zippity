@@ -252,12 +252,13 @@ fn install_signals() -> Result<()> {
 fn execute() -> Result<()> {
     install_signals()?;
     let mut input = Vec::new();
-    const MAX_REQUEST_BYTES: u64 = 32 * 1024 * 1024;
+    // Room for a copy of every member of the largest index, each with its destination.
+    const MAX_REQUEST_BYTES: u64 = 128 * 1024 * 1024;
     std::io::stdin()
         .take(MAX_REQUEST_BYTES + 1)
         .read_to_end(&mut input)?;
     if input.len() > MAX_REQUEST_BYTES as usize {
-        return Err(Error::new("limit", "Request exceeds 32 MiB"));
+        return Err(Error::new("limit", "Request exceeds 128 MiB"));
     }
     let mut value: serde_json::Value = serde_json::from_slice(&input)
         .map_err(|_| Error::new("request", "Invalid JSON request"))?;

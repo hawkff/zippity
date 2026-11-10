@@ -183,12 +183,15 @@ pub fn run<W: Write + Send>(
         });
         let error_readers: Vec<_> = errors
             .into_iter()
-            .map(|stderr| {
+            .map(|mut stderr| {
                 let stopped = &stopped;
                 scope.spawn(move || {
+                    // The first 64 KiB tell a wrong password from damaged members. The rest
+                    // is read and dropped, so a long report cannot block its writer. One byte
+                    // more than that shows whether there was a rest.
                     let mut bytes = Vec::new();
-                    if stderr.take(65_537).read_to_end(&mut bytes).is_err() || bytes.len() > 65_536
-                    {
+                    let kept = stderr.by_ref().take(65_537).read_to_end(&mut bytes);
+                    if kept.is_err() || std::io::copy(&mut stderr, &mut std::io::sink()).is_err() {
                         stopped.store(true, Ordering::Relaxed);
                     }
                     bytes
@@ -242,11 +245,13 @@ pub fn run<W: Write + Send>(
             .map_err(|_| Error::new("io", "Archive output reader failed"))??;
         let mut diagnostic = String::new();
         for reader in error_readers {
-            let bytes = reader
+            let mut bytes = reader
                 .join()
                 .map_err(|_| Error::new("io", "Archive error reader failed"))?;
+            // A report cut at the limit ends inside a line, which says nothing reliable.
             if bytes.len() > 65_536 {
-                return Err(Error::new("limit", "Archive error output exceeds 64 KiB"));
+                let whole = bytes[..65_536].iter().rposition(|&byte| byte == b'\n');
+                bytes.truncate(whole.map_or(0, |end| end + 1));
             }
             diagnostic.push_str(&String::from_utf8_lossy(&bytes));
         }
@@ -274,7 +279,27 @@ pub fn run<W: Write + Send>(
 
 #[cfg(test)]
 mod tests {
-    use super::{argument_groups, member_failure, wrong_password};
+    use super::{argument_groups, member_failure, run, wrong_password};
+    use std::{process::Command, time::Duration};
+
+    #[test]
+    fn long_reports_still_name_their_cause() {
+        // 4000 lines come to twice the 64 KiB that are kept.
+        let kind = |line: &str| {
+            let script = format!(
+                "i=0; while [ $i -lt 4000 ]; do echo '{line}' >&2; i=$((i+1)); done; exit 2"
+            );
+            let mut command = Command::new("sh");
+            command.args(["-c", &script]);
+            let limit = Duration::from_secs(60);
+            run(vec![command], "", &mut std::io::sink(), 0, limit, false)
+                .unwrap_err()
+                .kind
+        };
+        assert_eq!(kind("ERROR: Wrong password : notes.txt"), "password");
+        assert_eq!(kind("ERROR: Data Error : notes.txt"), "damaged");
+        assert_eq!(kind("A report of some other failure"), "archive");
+    }
 
     #[test]
     fn argument_groups_stay_under_the_budget() {

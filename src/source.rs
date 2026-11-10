@@ -252,6 +252,14 @@ fn volumes(path: &Path) -> Result<(Vec<Volume>, bool)> {
             "Archive or its first volume is missing",
         ));
     }
+    // A numbered name without its set's first volume, such as notes.2024 or game.x86, is
+    // not taken for a volume. Asking for a first volume that is missing still is.
+    if !parts.contains_key(&0)
+        && family.index(name) != Some(0)
+        && matches!(family, Family::Split(_) | Family::Old(_))
+    {
+        return Err(not_archive());
+    }
     let mut volumes = Vec::new();
     for (expected, (actual, path)) in parts.into_iter().enumerate() {
         if expected != actual {
@@ -280,6 +288,10 @@ fn volumes(path: &Path) -> Result<(Vec<Volume>, bool)> {
         });
     }
     Ok((volumes, !matches!(family, Family::Single(_))))
+}
+
+fn not_archive() -> Error {
+    Error::new("not_archive", "Not an archive zippity can open")
 }
 
 fn detect(archive: &Path, volumes: bool) -> Result<Format> {
@@ -345,7 +357,7 @@ fn detect(archive: &Path, volumes: bool) -> Result<Format> {
         // A self-extracting StuffIt archive has no signature of its own; unar decides.
         Format::Unar
     } else {
-        return Err(Error::new("not_archive", "Not an archive zippity can open"));
+        return Err(not_archive());
     };
     Ok(format)
 }
@@ -780,6 +792,18 @@ mod tests {
         assert!(source.unchanged().is_err());
         fs::remove_file(&archive).unwrap();
         assert!(Source::open(&archive).is_err());
+    }
+
+    #[test]
+    fn numbered_names_without_a_first_volume_are_not_volumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let kind = |name: &str| Source::open(&dir.path().join(name)).unwrap_err().kind;
+        for name in ["notes.2024", "game.x86", "snapshot.z80", "backup.7z.002"] {
+            fs::write(dir.path().join(name), b"plain text").unwrap();
+            assert_eq!(kind(name), "not_archive", "{name}");
+        }
+        // Asking for the first volume of a set that lacks it still says so.
+        assert_eq!(kind("backup.7z.001"), "volume");
     }
 
     #[test]
