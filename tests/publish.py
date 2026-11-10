@@ -87,6 +87,10 @@ with tempfile.TemporaryDirectory() as temporary:
     broken[broken.index(b'damaged member')] ^= 1
     damaged.write_bytes(bytes(broken))
     (root / 'random.bin').write_bytes(os.urandom(3 * 1024 * 1024))
+    beside = root / 'beside.zip'
+    with zipfile.ZipFile(beside, 'w') as out:
+        out.writestr('dir/b.txt', 'b\n')
+        out.writestr('dir/._b.txt', 'metadata of b')
     for kind in ('ExFAT', 'MS-DOS FAT32'):
         image, volume = root / (kind + '.dmg'), root / kind
         volume.mkdir()
@@ -131,20 +135,21 @@ with tempfile.TemporaryDirectory() as temporary:
             first = call('create', **request)['path']
             assert len(names(parts)) >= 3 and call('list', archive=first)['entries'][0]['size'] == 3 * 1024 * 1024, (kind, names(parts))
             assert call('create', good=False, **request)['kind'] == 'exists'
-            # A save replaces the archive. Save As stages archive members, which it could not
-            # keep apart from such files, so it refuses a volume that adds them.
+            # A save replaces the archive, and Save As writes a new one beside it. Both stage
+            # away from this volume, so no `._name` file of macOS gets in, and a `._name`
+            # member of the archive keeps its own bytes.
             revision = call('list', archive=str(made))['source']['revision']
             changes = call('stage', sources=[str(volume / 'b.txt')]) + [{'kind': 'rename', 'from': 'a.txt', 'to': 'renamed.txt'}]
             saved = call('apply', archive=str(made), revision=revision, changes=changes)
-            assert {e['path'] for e in saved['entries']} == {'b.txt', 'renamed.txt'}, (kind, saved['entries'])
-            convert = {'op': 'convert', 'archive': str(made), 'revision': saved['source']['revision'],
-                'destination': str(volume / 'converted.7z'), 'format': '7z', 'options': {'level': 5}}
-            result = subprocess.run([BINARY], input=json.dumps(convert).encode(), capture_output=True, timeout=120)
-            if result.returncode == 0:
-                assert stored(volume / 'converted.7z') == ['b.txt', 'renamed.txt'], (kind, stored(volume / 'converted.7z'))
-            else:
-                assert json.loads(result.stderr)['kind'] == 'unsupported' and not (volume / 'converted.7z').exists(), (kind, result.stderr)
-            leftovers = [name for name in names(volume) if name.startswith('.zippity-')]
+            assert stored(made) == ['b.txt', 'renamed.txt'], (kind, stored(made))
+            result = call('convert', archive=str(made), revision=saved['source']['revision'],
+                destination=str(volume / 'converted.7z'), format='7z', options={'level': 5})
+            assert stored(result['path']) == ['b.txt', 'renamed.txt'], (kind, stored(result['path']))
+            revision = call('list', archive=str(beside))['source']['revision']
+            result = call('convert', archive=str(beside), revision=revision, destination=str(volume / 'beside.7z'), format='7z', options={'level': 5})
+            kept = subprocess.run(['7zz', 'e', '-so', result['path'], 'dir/._b.txt'], capture_output=True, check=True).stdout
+            assert kept == b'metadata of b' and stored(result['path']) == ['dir', 'dir/._b.txt', 'dir/b.txt'], (kind, kept)
+            leftovers = [path.name for path in volume.iterdir() if path.name.startswith(('.zippity-', '._.zippity-'))]
             assert not leftovers, (kind, leftovers)
             # A temporary file on an ordinary volume is not traded for a file on this one,
             # which has no owners to keep anyone out.

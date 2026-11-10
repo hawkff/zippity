@@ -13,10 +13,14 @@ BINARY = Path(__file__).resolve().parents[1] / 'target/debug/zippity'
 def call(op, good=True, env=None, **values):
     result = subprocess.run([BINARY], input=json.dumps({'op':op, **values}).encode(), capture_output=True, timeout=90, env=env)
     assert (result.returncode == 0) == good, (op, result.stderr.decode())
-    if good and op == 'read':
-        return result.stdout
     # Copies print progress lines before their result.
     return json.loads(result.stdout.splitlines()[-1]) if good else json.loads(result.stderr)
+
+def content(archive, revision, member, password=None):
+    """What a member holds, copied out."""
+    with tempfile.TemporaryDirectory() as out:
+        call('copy', archive=str(archive), revision=revision, member=member, password=password, destination=str(Path(out) / 'member'))
+        return (Path(out) / 'member').read_bytes()
 
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
@@ -174,10 +178,8 @@ with tempfile.TemporaryDirectory() as temporary:
             planned = call('plan', archive=str(archive), revision=updated['source']['revision'], password='fixture-password', changes=changes)
             saved = call('apply', archive=str(archive), revision=updated['source']['revision'], password='fixture-password', changes=changes)
             assert {e['path'] for e in saved['entries']} == {e['path'] for e in planned}
-            assert call('read', archive=str(archive), revision=saved['source']['revision'], password='fixture-password',
-                member='added/inner/file.txt', offset=0, length=100) == b'early\n'
-            assert call('read', archive=str(archive), revision=saved['source']['revision'], password='fixture-password',
-                member='renamed/inner/file.txt', offset=0, length=100) == b'late\n'
+            assert content(str(archive), saved['source']['revision'], 'added/inner/file.txt', 'fixture-password') == b'early\n'
+            assert content(str(archive), saved['source']['revision'], 'renamed/inner/file.txt', 'fixture-password') == b'late\n'
             for change in (
                 {'kind':'rename','from':'renamed','to':'replace.txt/blocked'},
                 dict(last, path='replace.txt/blocked'),
@@ -204,8 +206,7 @@ with tempfile.TemporaryDirectory() as temporary:
         converted = call('list', archive=result['path'], password=password)
         assert {e['path'] for e in converted['entries']} == {e['path'] for e in index['entries']}
         assert all(e['encrypted'] == bool(password) for e in converted['entries'] if not e['directory'])
-        assert call('read', archive=str(target), revision=converted['source']['revision'], password=password,
-            member='files/replace.txt', offset=0, length=100) == b'after\n'
+        assert content(str(target), converted['source']['revision'], 'files/replace.txt', password) == b'after\n'
     for revision, target, kind in (('stale', 'stale.zip', 'changed'), (index['source']['revision'], 'converted.zip', 'exists')):
         before = (root / target).read_bytes() if (root / target).exists() else None
         error = call('convert', good=False, archive=str(encrypted), revision=revision, password='fixture-password',
@@ -240,7 +241,7 @@ with tempfile.TemporaryDirectory() as temporary:
     result = call('convert', archive=str(locked), revision=index['source']['revision'], destination=str(root / 'unlocked.zip'), format='zip', options={'level':5})
     saved = call('list', archive=result['path'])
     assert saved['entries'][0]['mode'] == 0o400, saved['entries']
-    assert call('read', archive=result['path'], revision=saved['source']['revision'], member='locked.txt', offset=0, length=100) == b'locked\n'
+    assert content(result['path'], saved['source']['revision'], 'locked.txt') == b'locked\n'
     index = call('list', archive=str(empty))
     error = call('convert', good=False, archive=str(empty), revision=index['source']['revision'], destination=str(root / 'empty.7z'), format='7z', options={'level':5})
     assert error['kind'] == 'empty' and not (root / 'empty.7z').exists()
@@ -303,7 +304,7 @@ with tempfile.TemporaryDirectory() as temporary:
         assert {e['path'] for e in index['entries']} == set(spaced[:3]), (format, index['entries'])
         saved = call('apply', archive=str(archive), revision=index['source']['revision'], changes=call('stage', sources=[str(odd / spaced[3])]))
         assert {e['path'] for e in saved['entries']} == set(spaced), (format, saved['entries'])
-        assert call('read', archive=str(archive), revision=saved['source']['revision'], member=spaced[1], offset=0, length=100) == spaced[1].encode()
+        assert content(str(archive), saved['source']['revision'], spaced[1]) == spaced[1].encode()
 
     if 'rar' in formats:
         names = root / 'literal-names'

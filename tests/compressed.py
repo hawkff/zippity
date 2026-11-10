@@ -52,12 +52,6 @@ def single(archive, format, unknown):
         'files': [{'member': 'notes.txt', 'destination': str(destination)}]})
     assert report == {'done': len(TEXT), 'damaged': [], 'lost': [], 'partial': []}, (archive.name, report)
     assert destination.read_bytes() == TEXT, archive.name
-    read = {'op': 'read', 'archive': str(archive), 'revision': revision, 'member': 'notes.txt', 'offset': 0, 'length': 16}
-    if unknown:
-        assert helper(read, success=False)['kind'] == 'unsupported'
-    else:
-        output = subprocess.run([BINARY], input=json.dumps(read).encode(), capture_output=True, timeout=60)
-        assert output.returncode == 0 and output.stdout == TEXT[:16], (archive.name, output.stderr)
 
 
 with tempfile.TemporaryDirectory() as temporary:

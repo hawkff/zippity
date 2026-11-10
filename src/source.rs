@@ -225,7 +225,7 @@ fn volumes(path: &Path) -> Result<(Vec<Volume>, bool)> {
         (Family::Single(_) | Family::Old(_), Some(stem)) => Family::Spanned(stem),
         (family, _) => family,
     };
-    let mut parts = BTreeMap::new();
+    let (mut parts, mut beyond) = (BTreeMap::new(), false);
     if matches!(family, Family::Single(_)) {
         parts.insert(0, parent.join(name));
     } else {
@@ -238,13 +238,22 @@ fn volumes(path: &Path) -> Result<(Vec<Volume>, bool)> {
             let Some(index) = family.index(filename) else {
                 continue;
             };
+            // The numbered part after the last a set may have: 7zz would read it after a
+            // full set, and beside a smaller set it is an unrelated file.
+            if index == MAX_VOLUMES && matches!(family, Family::Split(_)) {
+                beyond = true;
+                continue;
+            }
             if parts.insert(index, entry.path()).is_some() {
                 return Err(Error::new("volume", "Archive volume names are ambiguous"));
             }
-            if parts.len() > 10_000 {
+            if parts.len() > MAX_VOLUMES {
                 return Err(Error::new("limit", "Archive has too many volumes"));
             }
         }
+    }
+    if beyond && parts.len() == MAX_VOLUMES {
+        return Err(Error::new("limit", "Archive has too many volumes"));
     }
     if parts.is_empty() {
         return Err(Error::new(
@@ -342,7 +351,17 @@ fn detect(archive: &Path, volumes: bool) -> Result<Format> {
         if volumes && single == Format::Lz4 {
             return Err(Error::new("unsupported", "Split lz4 files are unsupported"));
         }
-        if holds_tar(&name, archive, single, volumes)? {
+        // Nor does a number after the name, as on a dated copy, change what a compressed
+        // file holds. Other formats go by content before any such name is asked.
+        let undated = match name.rsplit_once('.') {
+            Some((stem, number))
+                if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                stem
+            }
+            _ => name.as_str(),
+        };
+        if holds_tar(undated, archive, single, volumes)? {
             tar
         } else {
             single
@@ -545,6 +564,15 @@ fn spanned<'a>(parent: &Path, name: &'a str) -> Option<&'a str> {
     (magic == *b"PK\x07\x08" && sibling(["zip", "ZIP"]).is_some()).then_some(stem)
 }
 
+/// The most volumes a set may have.
+const MAX_VOLUMES: usize = 10_000;
+
+/// The number that a numbered volume's extension spells.
+fn volume_number(digits: &str) -> Option<usize> {
+    let number = digits.parse().ok()?;
+    digits.bytes().all(|b| b.is_ascii_digit()).then_some(number)
+}
+
 enum Family<'a> {
     Single(&'a str),
     Part(&'a str),
@@ -567,7 +595,9 @@ impl<'a> Family<'a> {
             return Self::Old(&name[..stem.len()]);
         }
         if let Some((stem, extension)) = name.rsplit_once('.') {
-            if extension.len() >= 3 && extension.bytes().all(|b| b.is_ascii_digit()) {
+            // A set needs every volume from the first, so a number above the most a set may
+            // have, as in backup.zip.20241110, is part of the name.
+            if extension.len() >= 3 && volume_number(extension).is_some_and(|n| n <= MAX_VOLUMES) {
                 return Self::Split(stem);
             }
             let bytes = extension.as_bytes();
@@ -599,10 +629,13 @@ impl<'a> Family<'a> {
             }
             Self::Split(prefix) => {
                 let digits = name.strip_prefix(prefix)?.strip_prefix('.')?;
-                if digits.len() < 3 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                if digits.len() < 3 {
                     return None;
                 }
-                digits.parse::<usize>().ok()?.checked_sub(1)
+                // One more than a set may have still counts: 7zz would read that part.
+                volume_number(digits)
+                    .filter(|&number| number <= MAX_VOLUMES + 1)?
+                    .checked_sub(1)
             }
             Self::Part(prefix) => {
                 let rest = name.strip_prefix(prefix)?.to_ascii_lowercase();
@@ -804,6 +837,37 @@ mod tests {
         }
         // Asking for the first volume of a set that lacks it still says so.
         assert_eq!(kind("backup.7z.001"), "volume");
+        // A number no set can reach is part of the name: content decides, siblings do not.
+        for name in ["dated.zip.20241110", "set.zip.001", "set.zip.20241110"] {
+            fs::write(dir.path().join(name), b"PK\x03\x04fixture").unwrap();
+        }
+        let dated = Source::open(&dir.path().join("dated.zip.20241110")).unwrap();
+        assert!(dated.format == Format::Zip && !dated.multipart);
+        // The name before the number still says that a compressed file holds a tar.
+        fs::write(dir.path().join("dated.tar.gz.20241110"), b"\x1f\x8b\x08").unwrap();
+        let tar = Source::open(&dir.path().join("dated.tar.gz.20241110")).unwrap();
+        assert_eq!(tar.format, Format::TarGzip);
+        // Content still comes before a name that only a number hides.
+        let mut disc = vec![0; 16 * 2048];
+        disc.extend(b"\x01CD001\x01\0");
+        fs::write(dir.path().join("disc.tar.1"), disc).unwrap();
+        let disc = Source::open(&dir.path().join("disc.tar.1")).unwrap();
+        assert_eq!(disc.format, Format::Iso);
+        for stray in ["set.zip.10001", "set.zip.010001"] {
+            fs::write(dir.path().join(stray), b"unrelated").unwrap();
+        }
+        // A spanned ZIP still counts every segment it finds.
+        fs::write(dir.path().join("span.z01"), b"PK\x07\x08first").unwrap();
+        fs::write(dir.path().join("span.zip"), b"tail").unwrap();
+        fs::write(dir.path().join("span.z10000"), b"far").unwrap();
+        assert_eq!(kind("span.zip"), "volume");
+        let parts = |name: &str| Source::open(&dir.path().join(name)).unwrap().volumes.len();
+        assert_eq!(parts("set.zip.001"), 1);
+        // One part more than a set may have is refused, since 7zz would read them all.
+        for number in 2..=MAX_VOLUMES {
+            fs::write(dir.path().join(format!("set.zip.{number:03}")), b"").unwrap();
+        }
+        assert_eq!(kind("set.zip.001"), "limit");
     }
 
     #[test]

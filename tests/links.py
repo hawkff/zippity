@@ -59,12 +59,10 @@ with tempfile.TemporaryDirectory() as temporary:
         report = call('copy_many', archive=str(archive), revision=revision, files=files, root=str(alone))
         assert report.get('skipped', []) == ['dir/up'] and not os.path.lexists(alone / 'up'), report
         assert os.readlink(alone / 'rel') == 'sub/file.txt'
-        # Without a root no link is made, and reading a link is refused.
+        # Without a root no link is made, and a lone copy of a link is refused.
         nowhere = root / f'nowhere-{format}'
         report = call('copy_many', archive=str(archive), revision=revision, files=[{'member': 'dir/rel', 'destination': str(nowhere)}])
         assert report.get('skipped', []) == ['dir/rel'] and not os.path.lexists(nowhere), report
-        error = call('read', good=False, archive=str(archive), member='dir/rel', revision=revision, offset=0, length=10)
-        assert error['kind'] == 'unsupported', error
         error = call('copy', good=False, archive=str(archive), member='dir/rel', revision=revision, destination=str(nowhere))
         assert error['kind'] == 'unsupported' and not os.path.lexists(nowhere), error
     # A link already in the destination that leads elsewhere is not passed through.

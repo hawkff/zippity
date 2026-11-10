@@ -285,8 +285,6 @@ with tempfile.TemporaryDirectory() as temporary:
         archive.write_bytes(stuffit([('root.txt', ROOT_TEXT), ('inner.txt', INNER_TEXT), ('sub', [('deep.txt', ROOT_TEXT)])]))
         index = check(archive, {'root.txt': ROOT_TEXT, 'inner.txt': INNER_TEXT, 'sub/deep.txt': ROOT_TEXT}, format='unar')
         revision = index['source']['revision']
-        read = helper({'op': 'read', 'archive': str(archive), 'revision': revision, 'member': 'root.txt', 'offset': 0, 'length': 4}, success=False)
-        assert read['kind'] == 'unsupported', read
         # A member that fails its checksum is reported; the others still copy.
         broken = work / 'broken.sit'
         data = bytearray(archive.read_bytes())

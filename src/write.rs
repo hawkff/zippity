@@ -741,7 +741,6 @@ fn add_staged(
     settings: &Options,
     password: Option<&str>,
 ) -> Result<()> {
-    remove_attribute_files(inputs, names.iter().map(String::as_str))?;
     let list = tempfile::NamedTempFile::new_in(inputs.parent().expect("staging parent"))?;
     // 7zz and rar trim each line of a list and drop one pair of quotes around it, so every
     // name goes in quotes and keeps its own leading and trailing spaces and quotes.
@@ -775,47 +774,37 @@ fn attribute_file(path: &Path) -> bool {
         .is_some_and(|name| fs::symlink_metadata(path.with_file_name(name)).is_ok())
 }
 
-/// Removes the attribute files macOS added in `staging`, which an archiver that is given a
-/// folder would add with it. A `staged` file with such a name stays. It is known by what
-/// the volume holds under its name, since a volume may spell a name in another Unicode form.
-fn remove_attribute_files<'a>(staging: &Path, staged: impl Iterator<Item = &'a str>) -> Result<()> {
-    let mut own = BTreeSet::new();
-    for name in staged {
-        let last = name.rsplit('/').next().unwrap_or(name);
-        if last.starts_with("._") {
-            let meta = fs::symlink_metadata(staging.join(name))?;
-            own.insert((meta.dev(), meta.ino()));
+/// A private folder for staged inputs, and the `inputs` folder made in it. It sits under
+/// `beside`, unless macOS keeps each file's attributes there in a `._name` file beside the
+/// file, as on exFAT and FAT volumes. An archiver that is given a folder would add those
+/// files, and among the copies for Save As they could not be told from the `._name` members
+/// an archive holds, and could take their place. Inputs then go to the temporary folder.
+fn input_staging(beside: &Path) -> Result<(tempfile::TempDir, PathBuf)> {
+    let temporary = std::env::temp_dir();
+    for parent in [beside, temporary.as_path()] {
+        let staging = private_directory(parent)?;
+        let probe = staging.path().join("probe");
+        fs::write(&probe, "probe")?;
+        // An attribute of its own shows where the volume keeps them, whether or not macOS
+        // adds one. A volume that takes none has no such files.
+        let flags = rustix::fs::XattrFlags::empty();
+        let _ = rustix::fs::setxattr(&probe, "user.zippity.probe", b"1", flags);
+        let shadowed = match fs::symlink_metadata(staging.path().join("._probe")) {
+            Ok(_) => true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(err) => return Err(err.into()),
+        };
+        if !shadowed {
+            fs::remove_file(&probe)?;
+            let inputs = staging.path().join("inputs");
+            fs::create_dir(&inputs)?;
+            return Ok((staging, inputs));
         }
     }
-    // Folders inside come first. Removing a file changes its folder's time, and setting that
-    // time back makes macOS add the folder's own attribute file beside it.
-    fn clean(folder: &Path, own: &BTreeSet<(u64, u64)>) -> Result<()> {
-        let modified = fs::metadata(folder)?.modified()?;
-        for entry in fs::read_dir(folder)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                clean(&entry.path(), own)?;
-            }
-        }
-        let mut removed = false;
-        for entry in fs::read_dir(folder)? {
-            let entry = entry?;
-            let path = entry.path();
-            if entry.file_type()?.is_dir() || !attribute_file(&path) {
-                continue;
-            }
-            let meta = entry.metadata()?;
-            if !own.contains(&(meta.dev(), meta.ino())) {
-                fs::remove_file(&path)?;
-                removed = true;
-            }
-        }
-        if removed {
-            fs::File::open(folder)?.set_modified(modified)?;
-        }
-        Ok(())
-    }
-    clean(staging, &own)
+    Err(Error::new(
+        "unsupported",
+        "This volume and the temporary folder both keep file attributes in separate files, so nothing can be staged",
+    ))
 }
 
 fn store_implicit_directories(
@@ -828,16 +817,16 @@ fn store_implicit_directories(
     if !index.entries.iter().any(|e| e.implicit_directory) {
         return Ok(());
     }
-    let staging = private_directory(temporary)?;
+    let (_staging, inputs) = input_staging(temporary)?;
     let mut names = Vec::new();
     for entry in index.entries.iter().filter(|e| e.implicit_directory) {
-        fs::create_dir_all(staging.path().join(&entry.path))?;
+        fs::create_dir_all(inputs.join(&entry.path))?;
         names.push(entry.path.clone());
     }
     add_staged(
         archive,
         index.source.format,
-        staging.path(),
+        &inputs,
         &names,
         settings,
         password,
@@ -916,8 +905,7 @@ pub fn create(
         }
     }
     let temporary = private_directory(&parent)?;
-    let inputs = temporary.path().join("inputs");
-    fs::create_dir(&inputs)?;
+    let (_staging, inputs) = input_staging(temporary.path())?;
     let (_directories, names) = prepare_inputs(changes.iter(), &inputs)?;
     let output = temporary.path().join("output");
     fs::create_dir(&output)?;
@@ -1037,31 +1025,14 @@ pub fn convert(
     if index.entries.is_empty() {
         return Err(Error::new("empty", "The archive has no members to save"));
     }
-    let staging = private_directory(&parent)?;
-    // In this staging the `._name` files macOS adds on exFAT and FAT volumes could not be
-    // told from the `._name` members an archive holds, and could take their place.
-    let probe = staging.path().join("probe");
-    fs::write(&probe, "probe")?;
-    let shadowed = match fs::symlink_metadata(staging.path().join("._probe")) {
-        Ok(_) => true,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-        Err(err) => return Err(err.into()),
-    };
-    fs::remove_file(&probe)?;
-    let _ = fs::remove_file(staging.path().join("._probe"));
-    if shadowed {
-        return Err(Error::new(
-            "unsupported",
-            "This volume keeps file attributes in separate files, so Save As cannot stage copies on it; save to another volume",
-        ));
-    }
+    let (_staging, copies) = input_staging(&parent)?;
     // Dropped before `staging`, so read-only folders cannot keep it from being removed.
     let mut staged = StagedDirectories(Vec::new());
     let (mut files, mut directories) = (Vec::new(), Vec::new());
     for entry in &index.entries {
         let target = engine::Target {
             member: entry.path.clone(),
-            destination: staging.path().join(&entry.path),
+            destination: copies.join(&entry.path),
         };
         if entry.directory {
             fs::create_dir_all(&target.destination)?;
@@ -1074,7 +1045,7 @@ pub fn convert(
     }
     // Finder metadata is copied as it is stored, and stays out of listings again.
     for entry in index.metadata.iter().filter(|entry| !entry.directory) {
-        let destination = staging.path().join(&entry.path);
+        let destination = copies.join(&entry.path);
         fs::create_dir_all(destination.parent().expect("staged member parent"))?;
         files.push(engine::Target {
             member: entry.path.clone(),
@@ -1095,7 +1066,7 @@ pub fn convert(
         &files,
         &directories,
         flags,
-        Some(staging.path()),
+        Some(copies.as_path()),
     )?;
     if !report.damaged.is_empty() || !report.lost.is_empty() {
         return Err(Error::new(
@@ -1113,11 +1084,11 @@ pub fn convert(
     for entry in copied.filter(|entry| entry.link.is_none()) {
         let needed = if entry.directory { 0o500 } else { 0o400 };
         if let Some(mode) = entry.mode.filter(|mode| mode & needed != needed) {
-            let path = staging.path().join(&entry.path);
+            let path = copies.join(&entry.path);
             fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o777 | needed))?;
         }
     }
-    let sources = fs::read_dir(staging.path())?
+    let sources = fs::read_dir(&copies)?
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<std::io::Result<Vec<_>>>()?;
     create(&sources, destination, format, settings, new_password, false)
@@ -1291,13 +1262,13 @@ pub fn apply(
                     .collect();
                 delete(&working, index.source.format, &stale, password)?;
             }
-            let staging = private_directory(temporary.path())?;
-            let (_directories, names) = prepare_inputs(inputs.into_values(), staging.path())?;
+            let (_staging, staged) = input_staging(temporary.path())?;
+            let (_directories, names) = prepare_inputs(inputs.into_values(), &staged)?;
             finder_seen |= names.iter().any(|name| name.starts_with("__MACOSX/"));
             add_staged(
                 &working,
                 index.source.format,
-                staging.path(),
+                &staged,
                 &names,
                 &settings,
                 write_password,
@@ -1472,35 +1443,6 @@ mod tests {
             to: "c".into(),
         };
         assert_eq!(paths(rename), ["a-b", "a.b", "a0", "c", "c/b"]);
-    }
-
-    #[test]
-    fn staging_drops_the_attribute_files_it_did_not_stage() {
-        let root = tempfile::tempdir().unwrap();
-        let names = [
-            "a.txt",
-            "._a.txt",
-            "staged",
-            "._staged",
-            "._alone",
-            "dir/b.txt",
-            "dir/._b.txt",
-        ];
-        for name in names {
-            let path = root.path().join(name);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, "x").unwrap();
-        }
-        let folder = fs::File::open(root.path().join("dir")).unwrap();
-        let old = UNIX_EPOCH + Duration::from_secs(1_600_000_000);
-        folder.set_modified(old).unwrap();
-        let staged = ["a.txt", "staged", "._staged", "dir", "dir/b.txt"];
-        remove_attribute_files(root.path(), staged.into_iter()).unwrap();
-        let left = |name: &str| root.path().join(name).exists();
-        // A staged file stays, and so does a file that sits beside no file of its name.
-        assert!(left("a.txt") && left("._staged") && left("._alone") && left("dir/b.txt"));
-        assert!(!left("._a.txt") && !left("dir/._b.txt"));
-        assert_eq!(folder.metadata().unwrap().modified().unwrap(), old);
     }
 
     #[test]
