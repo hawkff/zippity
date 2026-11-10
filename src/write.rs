@@ -785,10 +785,13 @@ fn input_staging(beside: &Path) -> Result<(tempfile::TempDir, PathBuf)> {
         let staging = private_directory(parent)?;
         let probe = staging.path().join("probe");
         fs::write(&probe, "probe")?;
-        // An attribute of its own shows where the volume keeps them, whether or not macOS
-        // adds one. A volume that takes none has no such files.
-        let flags = rustix::fs::XattrFlags::empty();
-        let _ = rustix::fs::setxattr(&probe, "user.zippity.probe", b"1", flags);
+        // On macOS an attribute of its own shows where the volume keeps them, whether or not
+        // macOS adds one. A volume that takes none has no such files. Elsewhere only a file
+        // server could keep attributes in files, and setting one would make it write such a file.
+        if cfg!(target_os = "macos") {
+            let flags = rustix::fs::XattrFlags::empty();
+            let _ = rustix::fs::setxattr(&probe, "user.zippity.probe", b"1", flags);
+        }
         let shadowed = match fs::symlink_metadata(staging.path().join("._probe")) {
             Ok(_) => true,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
