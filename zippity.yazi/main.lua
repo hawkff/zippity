@@ -12,7 +12,9 @@ local READ_CHUNK = 1024 * 1024
 
 local function seconds(time) return type(time) == "number" and time or time and time.unix end
 local function stat_of(file) return NIGHTLY and file.stat or file.cha end
-local function stat_at(...) return (fs.stat or fs.cha)(...) end
+-- A path's own metadata, not that of a link's target. Nightly builds since 2026-11-09 have
+-- fs.lstat for it, and their fs.stat follows links; older builds take a flag.
+local function stat_at(url) return (fs.lstat or fs.stat or fs.cha)(url, false) end
 
 -- Members with these names open as nested archives without a content probe. Every
 -- other file opens when the helper recognizes its content.
@@ -680,6 +682,8 @@ function M:Metadata(job)
 	return result and stat_of(result), err
 end
 M.SymlinkMetadata = M.Metadata
+-- Nightly builds since 2026-11-09 ask for these by other names.
+M.Stat, M.Lstat = M.Metadata, M.Metadata
 
 function M:Revalidate(job)
 	local result, err = self:File { url = job.file.url }
@@ -787,7 +791,7 @@ local function destination(target, directory, force, taken)
 	for attempt = 0, 10000 do
 		-- Nightly's Url() takes over a Url it receives, so pass Urls on as they are.
 		local candidate = attempt == 0 and target or parent:join(stem .. "_" .. attempt .. extension)
-		local existing, err = stat_at(candidate, false)
+		local existing, err = stat_at(candidate)
 		if not taken[tostring(candidate)] and (force or not existing) then
 			if not existing and err and err.kind ~= "NotFound" then return nil, err end
 			return candidate, nil, existing

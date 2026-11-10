@@ -218,6 +218,10 @@ for _, nightly in ipairs { false, true } do
 	local listing, handle = shaped:ReadDir { url = node("") }, shaped:Open { url = node("big.bin"), demand = {} }
 	local metadata = shaped:Metadata { url = node("big.bin") }
 	assert(metadata.len == #big)
+	-- Nightly builds since 2026-11-09 ask for a member's metadata as Stat and Lstat.
+	for _, op in ipairs { "Metadata", "SymlinkMetadata", "Stat", "Lstat" } do
+		assert(shaped:provide({ op = op, url = node("big.bin") }).len == #big, op)
+	end
 	reads = {}
 	if nightly then
 		local files, err = drain(listing)
@@ -233,6 +237,9 @@ for _, nightly in ipairs { false, true } do
 		shaped.extract = function() return #big end
 		assert(shaped:materialize(node("big.bin"), true))
 		assert(state.archives[shapes].entries["big.bin"].cached_at == 9, "Times cross ya.sync as numbers")
+		-- Since 2026-11-09 fs.stat follows links, and fs.lstat tells what a path itself is.
+		fs = { stat = function() error("fs.stat follows links") end, lstat = function() return { len = #big } end }
+		assert(shaped:materialize(node("big.bin"), true) == state.archives[shapes].entries["big.bin"].backing)
 		ya.time = function() return 1 end
 	else
 		assert(#listing == 1 and listing[1].cha.len == #big and listing[1].cha == listing[1].file.cha and handle == 0)

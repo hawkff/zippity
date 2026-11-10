@@ -28,6 +28,12 @@ def run():
         config, data, out = (root / name for name in ("config", "data", "out"))
         for path in (config, data, out, root / "tmp", root / "state", root / "cache"):
             path.mkdir()
+        # A destination folder with a link to a folder elsewhere and a link that leads nowhere.
+        linked, elsewhere = root / "linked", root / "elsewhere"
+        linked.mkdir()
+        elsewhere.mkdir()
+        os.symlink(elsewhere, linked / "folder")
+        os.symlink(root / "missing", linked / "folder_1")
         shutil.copytree(REPO / "zippity.yazi", config / "plugins" / "zippity.yazi")
         for name in ("vfs.toml", "keymap.toml", "yazi.toml"):
             shutil.copyfile(REPO / "examples" / name, config / name)
@@ -87,6 +93,7 @@ def run():
                 ("<F3>", f"reveal {shlex.quote(str(damaged))}"),
                 ("<F2>", f"reveal {shlex.quote(str(locked))}"),
                 ("<F1>", f"reveal {shlex.quote(str(tagged))}"),
+                ("<C-t>", f"cd {shlex.quote(str(linked))}"),
             )
         )
         assert keymap.count("\n]\n") == 1
@@ -171,6 +178,17 @@ def run():
             keys("p")
             wait(lambda: (out / "folder/nested.txt").exists(), "Folder copy failed")
             assert (out / "folder/nested.txt").read_text() == "Nested directory content.\n"
+
+            # A link at the destination is never extracted through. A forced paste refuses
+            # it, and a plain paste takes the next name that neither link holds.
+            keys("C-t")
+            wait(lambda: screen().splitlines()[0].split()[0].endswith("/linked"), "Link folder navigation failed")
+            keys("P")
+            wait(lambda: "Destination is not a regular" in screen(), "A forced paste did not refuse a link")
+            assert not list(elsewhere.iterdir()), "A forced paste went through a link"
+            keys("p")
+            wait(lambda: (linked / "folder_2/nested.txt").exists(), "A paste beside links did not take a free name")
+            assert not list(elsewhere.iterdir()) and (linked / "folder_1").is_symlink()
 
             keys("F3")
             wait(lambda: "damaged.zip" in screen().splitlines()[-1], "Damaged archive was not selected")
