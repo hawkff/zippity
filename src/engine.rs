@@ -717,12 +717,23 @@ pub fn copy_many(
             copy.entry.group
         }
     };
+    // Without names 7zz writes every member in one pass, and need not match each against
+    // the names, which costs it the square of a folder's size. That output is the
+    // selection's only when the selection is every file the archive holds, each once.
+    let files = index.entries.iter().chain(&index.metadata);
+    let whole = !pending.is_empty()
+        && index.hidden == 0
+        && source.format != Format::Unar
+        && pending.len() == files.filter(|entry| !entry.directory).count()
+        && pending
+            .windows(2)
+            .all(|pair| pair[0].entry.position < pair[1].entry.position);
     let mut states = vec![State::Open; pending.len()];
     let mut open = Vec::new();
     let lengths = pending.iter().map(|copy| copy.entry.original_path.len());
-    for range in crate::process::argument_groups(lengths) {
+    for range in commands_of(lengths, whole) {
         let members: Vec<usize> = range.collect();
-        let mut rest = pass(source, &pending, &members, password, &mut states)?;
+        let mut rest = pass(source, &pending, &members, password, &mut states, whole)?;
         if let &[only] = rest.as_slice()
             && members.len() == 1
         {
@@ -786,7 +797,7 @@ pub fn copy_many(
             if group(&pending[i]).is_some_and(|block| !decoded.insert(block)) {
                 continue;
             }
-            if !pass(source, &pending, &[i], password, &mut states)?.is_empty() {
+            if !pass(source, &pending, &[i], password, &mut states, false)?.is_empty() {
                 partial[i] = pending[i].written()? > 0;
             }
         }
@@ -977,21 +988,36 @@ fn link_inside(root: &Path, destination: &Path, target: &str, created: &BTreeSet
     })
 }
 
+/// The members each command of a pass takes: all of them when a pass over the `whole`
+/// archive names none, else as many as their names leave room for among the arguments.
+fn commands_of(
+    lengths: impl ExactSizeIterator<Item = usize>,
+    whole: bool,
+) -> Vec<std::ops::Range<usize>> {
+    if whole {
+        std::iter::once(0..lengths.len()).collect()
+    } else {
+        crate::process::argument_groups(lengths)
+    }
+}
+
 /// One 7zz pass over `members`, in listing order, into their temporary files, split into
-/// commands that fit the argument budget. Marks the members it verifies as copied and
-/// returns the others, still in order.
+/// commands that fit the argument budget. Members that are the `whole` archive take one
+/// command without names. Marks the members it verifies as copied and returns the others,
+/// still in order.
 fn pass(
     source: &Source,
     pending: &[Pending],
     members: &[usize],
     password: Option<&str>,
     states: &mut [State],
+    whole: bool,
 ) -> Result<Vec<usize>> {
     let mut open = Vec::new();
     let lengths = members
         .iter()
         .map(|&i| pending[i].entry.original_path.len());
-    for range in crate::process::argument_groups(lengths) {
+    for range in commands_of(lengths, whole) {
         let members = &members[range];
         let copies: Vec<&Pending> = members.iter().map(|&i| &pending[i]).collect();
         for copy in &copies {
@@ -1000,7 +1026,7 @@ fn pass(
                 copy.open()?.set_len(0)?;
             }
         }
-        match extract(source, &copies, password) {
+        match extract(source, &copies, password, whole) {
             Ok(()) => {
                 for &i in members {
                     states[i] = State::Copied;
@@ -1061,7 +1087,7 @@ fn salvage(
         if open.is_empty() {
             return Ok(());
         }
-        open = pass(source, pending, &open, password, states)?;
+        open = pass(source, pending, &open, password, states, false)?;
         let Some(&first) = open.first() else {
             return Ok(());
         };
@@ -1094,18 +1120,28 @@ fn single(
     password: Option<&str>,
     states: &mut [State],
 ) -> Result<()> {
-    if !pass(source, pending, &[member], password, states)?.is_empty() {
+    if !pass(source, pending, &[member], password, states, false)?.is_empty() {
         states[member] = State::Damaged;
     }
     Ok(())
 }
 
-/// Streams `copies` out of one 7zz pass, each into its temporary file.
-fn extract(source: &Source, copies: &[&Pending], password: Option<&str>) -> Result<()> {
-    let members: Vec<&str> = copies
-        .iter()
-        .map(|copy| copy.entry.original_path.as_str())
-        .collect();
+/// Streams `copies` out of one 7zz pass, each into its temporary file. Copies that are the
+/// `whole` archive are not named: an empty name selects every member.
+fn extract(
+    source: &Source,
+    copies: &[&Pending],
+    password: Option<&str>,
+    whole: bool,
+) -> Result<()> {
+    let members: Vec<&str> = if whole {
+        vec![""]
+    } else {
+        copies
+            .iter()
+            .map(|copy| copy.entry.original_path.as_str())
+            .collect()
+    };
     let size: u64 = copies.iter().map(|copy| copy.entry.size).sum();
     // A member of unknown size is alone in its archive and takes all the output.
     let unknown = copies.iter().any(|copy| copy.entry.unknown_size);
